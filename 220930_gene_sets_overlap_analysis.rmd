@@ -1,0 +1,282 @@
+---
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+# the sigDown_ko and sigUp_oe files are generated from the rnaseq markdown files created by Meeta
+# Draw the venn diagram of the overlap
+```{r}
+A.cds.sig <- subset(sigDown_ko) ## A.cds.result was generated from DESeq 
+B.cds.sig <- subset(sigUp_oe) ## B.cds.result was generated from DESeq 
+ 
+library(VennDiagram)
+setwd("D:/Postdoc/Project_NOP16_Ken/Figures_v3/")
+pdf("Fig3_NOP16_KO_down_OE_up_venn_diagram_v3.pdf")
+venn.plot = venn.diagram(list(A.cds.sig$ensgene, B.cds.sig$ensgene), 
+              NULL, 
+              fill=c("tomato2", "yellow"), 
+              alpha=c(0.5,0.5), 
+              cex = 2, 
+              cat.pos=0,
+              cat.fontface=4, 
+              category.names=c("NOP-16 KO down", "NOP-16 OE up"))
+grid.draw(venn.plot)
+dev.off()
+
+list(A.cds.sig$ensgene, B.cds.sig$ensgene)
+
+gene.overlap = as.data.frame(intersect(A.cds.sig$ensgene, B.cds.sig$ensgene))
+
+colnames(gene.overlap)=c("ensgene")
+
+write.csv(left_join(gene.overlap,res_tb_ko), 
+          file = "D:/Postdoc/Project_NOP16_Ken/sigUp_OE_overlap_sigDown_KO.csv",
+          quote=F, row.names = F)
+
+#> gene.overlap
+# [1] "ENSG00000021645" "ENSG00000092621" "ENSG00000186197"
+# [4] "ENSG00000006042" "ENSG00000166669" "ENSG00000162174"
+# [7] "ENSG00000018236" "ENSG00000188211" "ENSG00000163376"
+#[10] "ENSG00000072133" "ENSG00000139915" "ENSG00000188266"
+#[13] "ENSG00000132182" "ENSG00000105409" "ENSG00000277400"
+#[16] "ENSG00000145113" "ENSG00000009694" "ENSG00000131398"
+#[19] "ENSG00000206195" "ENSG00000244306"
+
+library("purrr")
+
+# Create vector of all genes
+gene_all = res_tb_ko$ensgene
+
+# Create list of vectors for genelist to overlap
+gene_sets=list(A.cds.sig$ensgene,B.cds.sig$ensgene)
+
+# creat function
+overlap_significance <- function(genes_all, gene_sets, iterations) {
+  observed <- length(reduce(gene_sets, intersect))
+  simulated <- map_dbl(seq_len(iterations), function(x) {
+    sim <- map(lengths(gene_sets), ~sample(genes_all, .x))
+    sim <- length(reduce(sim, intersect))
+    return(sim)
+  })
+  pval <- (sum(simulated >= observed) + 1) / (iterations + 1)
+  return(list(pval=pval, simulated_values=simulated, observed=observed))
+}
+
+overlap_significance(gene_all, gene_set,10000)
+
+#$pval
+#[1] 9.999e-05
+
+# Get the overlapping number of genes.
+observed <- length(reduce(gene_sets, intersect))
+observed
+
+```
+
+# the sigDown_oe and sigUp_ko files are generated from the rnaseq markdown files
+# Draw the venn diagram of the overlap
+```{r}
+A.cds.sig <- subset(sigDown_oe) ## A.cds.result was generated from DESeq 
+B.cds.sig <- subset(sigUp_ko) ## B.cds.result was generated from DESeq 
+ 
+library(VennDiagram)
+setwd("D:/Postdoc/Project_NOP16_Ken/Figures_v3/")
+pdf("Fig3_NOP16_KO_up_OE_down_venn_diagram.pdf")
+venn.plot = venn.diagram(list(A.cds.sig$ensgene, B.cds.sig$ensgene), 
+              NULL,        fill=c("yellow","tomato2"), 
+              alpha=c(0.5,0.5), 
+              cex = 2, 
+              cat.pos=0,
+              cat.fontface=4, 
+              category.names=c("NOP-16 OE down", "NOP-16 KO up"))
+grid.draw(venn.plot)
+dev.off()
+
+list(A.cds.sig$ensgene, B.cds.sig$ensgene)
+
+gene.overlap = intersect(A.cds.sig$ensgene, B.cds.sig$ensgene)
+
+gene.overlap
+
+library("purrr")
+
+# Create vector of all genes
+gene_all = res_tb_ko$ensgene
+
+# Create list of vectors for genelist to overlap
+gene_sets=list(A.cds.sig$ensgene,B.cds.sig$ensgene)
+
+# creat function
+overlap_significance <- function(genes_all, gene_sets, iterations) {
+  observed <- length(reduce(gene_sets, intersect))
+  simulated <- map_dbl(seq_len(iterations), function(x) {
+    sim <- map(lengths(gene_sets), ~sample(genes_all, .x))
+    sim <- length(reduce(sim, intersect))
+    return(sim)
+  })
+  pval <- (sum(simulated >= observed) + 1) / (iterations + 1)
+  return(list(pval=pval, simulated_values=simulated, observed=observed))
+}
+
+overlap_significance(gene_all, gene_set,10000)
+
+$pval
+[1] 1
+
+# Get the overlapping number of genes.
+observed <- length(reduce(gene_sets, intersect))
+observed
+
+```
+
+
+#10/06/22
+# Overlap analysis with H3K27me3 ChIP peaks
+# Genes increased HK27me3, downregulated genes NOP16 KO
+# Draw the venn diagram of the overlap
+```{r}
+h3k27me3_peak_ko = #read.csv(file="D:/Postdoc/Project_NOP16_Ken/diffbind_analysis/diffbind_analysis/results/ng_KO_spikeCtl_resAnnot_v2.txt",header = T,stringsAsFactors = F, sep="\t")
+
+h3k27me3_peak_ko = read.csv(file="D:/Postdoc/Project_NOP16_Ken/CUTRUN_diffbind_analysis/ng_KO_hg38_spikeCtl_resAnnot.txt",header = T,stringsAsFactors = F, sep="\t")
+
+h3k27me3_UP_ko <- h3k27me3_peak_ko %>% 
+  dplyr::filter(FDR < 0.05 & Fold < -1) %>% 
+  arrange(desc(Fold))  %>% 
+  mutate_if(is.numeric, round, digits = 4)
+
+
+A.cds.sig <- as.data.frame(h3k27me3_UP_ko$GENEID) ##  was generated from DESeq 
+A.cds.sig = as.data.frame(A.cds.sig[!duplicated(A.cds.sig),]) %>% na.omit()
+colnames(A.cds.sig)=c("ensgene")
+
+B.cds.sig <- subset(sigDown_ko) ## B.cds.result was generated from DESeq 
+ 
+library(VennDiagram)
+setwd("D:/Postdoc/Project_NOP16_Ken/Figures_v3/")
+#pdf("Fig3_CUT&RUN_NOP16_KO_downregulated_venn_diagram.pdf")
+pdf("FigS5B_v1.pdf")
+venn.plot = venn.diagram(list(A.cds.sig$ensgene, B.cds.sig$ensgene), 
+              NULL, 
+              fill=c("tomato2", "yellow"), 
+              alpha=c(0.5,0.5), 
+              cex = 2, 
+              cat.pos=c(0,165),
+              #margin=c(0.01,0.01,0.01,0.08),
+              cat.fontface=4, 
+              category.names=c("Genes increased in H327me3 mark", "Genes downregulated in KO"))
+grid.draw(venn.plot)
+dev.off()
+
+list(A.cds.sig$ensgene, B.cds.sig$ensgene)
+
+gene.overlap = as.data.frame(intersect(A.cds.sig$ensgene, B.cds.sig$ensgene))
+
+colnames(gene.overlap)=c("ensgene")
+
+write.csv(left_join(gene.overlap,res_tb_ko), 
+          file = "D:/Postdoc/Project_NOP16_Ken/NOP16_KO_downregulated_genes_overlap_genes_increased_in_H3K27me3.csv",
+          quote=F, row.names = F)
+
+library("purrr")
+
+# Create vector of all genes
+gene_all = res_tb_ko$ensgene
+
+# Create list of vectors for genelist to overlap
+gene_sets=list(A.cds.sig$ensgene,B.cds.sig$ensgene)
+
+# creat function
+overlap_significance <- function(genes_all, gene_sets, iterations) {
+  observed <- length(reduce(gene_sets, intersect))
+  simulated <- map_dbl(seq_len(iterations), function(x) {
+    sim <- map(lengths(gene_sets), ~sample(genes_all, .x))
+    sim <- length(reduce(sim, intersect))
+    return(sim)
+  })
+  pval <- (sum(simulated >= observed) + 1) / (iterations + 1)
+  return(list(pval=pval, simulated_values=simulated, observed=observed))
+}
+
+overlap_significance(gene_all, gene_set,10000)
+
+# Get the overlapping number of genes.
+observed <- length(reduce(gene_sets, intersect))
+observed
+
+```
+
+#10/06/22
+# Overlap analysis with H3K27me3 ChIP peaks
+# Genes decreased HK27me3, upregulated genes NOP16 OE
+# Draw the venn diagram of the overlap
+```{r}
+
+h3k27me3_peak_oe = read.csv(file="D:/Postdoc/Project_NOP16_Ken/CUTRUN_diffbind_analysis/EV_OE_hg38_spikeCtl_resAnnot.txt",header = T,stringsAsFactors = F, sep="\t")
+
+h3k27me3_DOWN_oe <- h3k27me3_peak_oe %>% 
+  dplyr::filter(FDR < 0.05 & Fold > 1) %>% 
+  arrange(desc(Fold))  %>% 
+  mutate_if(is.numeric, round, digits = 4)
+
+
+A.cds.sig <- as.data.frame(h3k27me3_DOWN_oe$GENEID) ##  was generated from DESeq 
+A.cds.sig = as.data.frame(A.cds.sig[!duplicated(A.cds.sig),]) %>% na.omit()
+colnames(A.cds.sig)=c("ensgene")
+
+B.cds.sig <- subset(sigUp_oe) ## B.cds.result was generated from DESeq 
+ 
+library(VennDiagram)
+setwd("D:/Postdoc/Project_NOP16_Ken/Figures_v3/")
+#pdf("Fig3_CUT&RUN_NOP16_OE_upregulated_venn_diagram.pdf")
+pdf("FigS5A_v1.pdf")
+venn.plot = venn.diagram(list(A.cds.sig$ensgene, B.cds.sig$ensgene), 
+              NULL, 
+              fill=c("tomato2", "yellow"), 
+              alpha=c(0.5,0.5), 
+              cex = 2, 
+              cat.pos=c(0,165),
+              #margin=c(0.01,0.01,0.01,0.08),
+              cat.fontface=4, 
+              category.names=c("Genes decreased in H3K27me3 mark", "Genes upregulated in O/E"))
+grid.draw(venn.plot)
+dev.off()
+
+list(A.cds.sig$ensgene, B.cds.sig$ensgene)
+
+gene.overlap = as.data.frame(intersect(A.cds.sig$ensgene, B.cds.sig$ensgene))
+
+colnames(gene.overlap)=c("ensgene")
+
+write.csv(left_join(gene.overlap,res_tb_ko), 
+          file = "D:/Postdoc/Project_NOP16_Ken/NOP16_OE_upregulated_genes_overlap_genes_decreased_in_H3K27me3.csv",
+          quote=F, row.names = F)
+
+library("purrr")
+
+# Create vector of all genes
+gene_all = res_tb_oe$ensgene
+
+# Create list of vectors for genelist to overlap
+gene_sets=list(A.cds.sig$ensgene,B.cds.sig$ensgene)
+
+# creat function
+overlap_significance <- function(genes_all, gene_sets, iterations) {
+  observed <- length(reduce(gene_sets, intersect))
+  simulated <- map_dbl(seq_len(iterations), function(x) {
+    sim <- map(lengths(gene_sets), ~sample(genes_all, .x))
+    sim <- length(reduce(sim, intersect))
+    return(sim)
+  })
+  pval <- (sum(simulated >= observed) + 1) / (iterations + 1)
+  return(list(pval=pval, simulated_values=simulated, observed=observed))
+}
+
+overlap_significance(gene_all, gene_sets,10000)
+
+# Get the overlapping number of genes.
+observed <- length(reduce(gene_sets, intersect))
+observed
+
+```
+
