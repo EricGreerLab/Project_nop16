@@ -1,0 +1,338 @@
+---
+title: OE vs control
+contact: mmistry@hsph.harvard.edu
+project: Greer RNA-seq Analysis
+output:
+  html_document:
+    code_folding: hide
+    highlights: pygments
+    theme: default
+    toc: true
+    toc_float:
+        collapsed: true
+        smooth_scroll: true
+    fig_width: 6
+    fig_height: 5
+---
+
+
+```{r setup, echo = FALSE, cache = FALSE}
+knitr::opts_chunk$set(dev = c('png', 'cairo_pdf'),
+                      fig.align = 'center', fig.height = 5, fig.width = 7,
+                      pdf.options(encoding = "ISOLatin9.enc"),
+                      fig.path='figures/',
+                      warning=FALSE, message=FALSE)
+```
+
+```{r load-libraries}
+loadlibs <- function(){
+library(SummarizedExperiment)
+library(gridExtra)
+library(DESeq2)
+library(RColorBrewer)
+library(pheatmap)
+library(AnnotationHub)
+library(ensembldb)
+library(tidyverse)
+library(ggrepel)
+}
+suppressPackageStartupMessages(loadlibs())
+```
+
+```{r functions, echo=FALSE}
+# Load functions
+sanitize_datatable = function(df, ...) {
+ # remove dashes which cause wrapping
+ DT::datatable(df, ..., rownames=gsub("-", "_", rownames(df)),
+                   colnames=gsub("-", "_", colnames(df)),
+               options = list(scrollX = TRUE,...))
+}
+
+```
+
+# Overview
+- Principal Investigator: Eric Greer
+- Experiment: Analysis of microprotein over- and under-expression 
+
+## Project Description
+There are over 5000 predicted microproteins (< 10kDa) in human proteomes, which remain uncharacterized. From labeling experiments the lab has found a huge amount of signal from these small proteins
+
+**Hypothesis:** these small proteins function as histone mimetics, recruiting chromatin modifiers away from the chromatin.
+
+By evaluating homology of these proteins to histone tails, they identified Nop16 to have a high homology for H3K27. Nop16 over expression decreases H3K27me3 modification, and a knockout results in increase in H3K27me3.
+
+**In this experiment, we look at with NOP16 over-expression against empty vector controls.**
+
+## Setup data and metadata
+First, we need to subset the data. **Keep only samples for overexpression and the respective controls** and see how many we have per sample group. 
+
+**We have a total of 2 control samples and 6 overexpression (OE) samples.**
+
+```{r load-data}
+se <- readRDS("data/bcbio-se.rds")
+
+# Keep only KO samples
+se <- se[,grep("OE", se$group)]
+
+sanitize_datatable(data.frame(colData(se)[,c("group", "replicate")]), style='bootstrap')
+```
+
+
+```{r setup-deseq2, message=F, warning=FALSE}
+# Factor group
+se$group <- factor(se$group)
+dds = DESeqDataSet(se, design=~group)
+
+# Run DESeq
+dds <- DESeq(dds)
+```
+
+## PCA
+
+From the PCA **we observe a clear separation of samples based on PC1, but it cannot be attributed solely to OE vs ctl**. The samples segregate into two groups on PC1, however the OE group is also quite close to one of the control samples. Additionally, we see a separation of the OE samples on PC2. There are two clusters each with three samples.
+
+```{r compute-pca}
+# Matrix of transformed counts for downstream visualization
+rld <- rlog(dds, blind = TRUE)
+
+# Get most variable genes
+cv <- apply(assay(rld), 1, function(x){
+  sd(x) / mean(x) * 100
+})
+
+cv_ordered <- cv %>% data.frame() %>% 
+  rownames_to_column() %>% 
+  arrange(desc(.))
+
+# Compute principal components
+pc <- prcomp(t(assay(rld)[cv_ordered$rowname[1:500],]))
+plot_pca <- data.frame(pc$x, colData(dds))
+```
+
+```{r oe-vs-ctl, fig.align='center'}
+
+# Plot with sample names used as data points
+ggplot(plot_pca, aes(PC1, PC2)) + 
+  geom_point(aes(color = group), size=3) +
+  geom_text_repel(aes(PC1, PC2, label=sample)) +
+  xlab('PC1') + ylab('PC2') +
+  theme_bw()
+```
+
+## Correlation heatmap
+Next, we take the rlog transformed count matrix for all genes and compute a sample-to-sample correlation matrix. These correlation values are visualized using a heatmap, in an effort to evaluate clustering of samples. Here, we observe samples to cluster by group.
+
+```{r corr-heatmap, fig.align="center"}
+
+# Set annotation and colors
+annotation <- colData(dds)[,c("group")] %>% 
+  data.frame() %>% dplyr::rename(group = ".")
+rownames(annotation) <- colnames(se)
+heat.colors <- brewer.pal(6, "YlOrRd")
+
+# Plot heatmap
+pheatmap(cor(assay(rld)), color = heat.colors, annotation = annotation)
+
+```
+
+
+## Differentially expressed genes {.tabset}
+After running DESeq2, with just the main effect (oe vs ko) modeled - we observe a smaller number of differentially expressed genes. This is expected given the within group variability we observed with our PCA plot. There are three plots presented below to assess our results.
+
+**The contrast is setup such that positive logFC means that expression is higher in overexpression samples than control samples.** 
+
+```{r de-analysis, warning=F, message=F}
+
+# Get results
+res_unshrunken <- results(dds, contrast=c("group", "OE", "control_OE"))
+res <- lfcShrink(dds, coef="group_OE_vs_control_OE", type="apeglm")
+
+# Query AnnotationHub
+ah <- AnnotationHub()
+human_ens <- query(ah, c("Homo sapiens", "EnsDb"))
+# Extract annotations of interest
+human_ens <- human_ens[["AH83216"]]
+
+# Create a gene-level dataframe 
+annotations_ahb <- genes(human_ens, return.type = "data.frame")  %>%
+  dplyr::select(gene_id, gene_name, entrezid, gene_biotype, description) %>% 
+  dplyr::filter(gene_id %in% rownames(res))
+
+# Keep one entrez Id per gene
+annotations_ahb$entrezid <- map(annotations_ahb$entrezid,1) %>%  unlist()
+
+# Add annotation
+res_tb <- res %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column("ensgene") %>%
+  left_join(annotations_ahb, by=c("ensgene" = "gene_id"))
+
+```
+
+### Dispersion plot
+
+We often look at the dispersion plot to get a good idea of whether or not our data is a good fit for the model. Dispersion is a metric for variance which also takes into consideration mean expression. A dispersion value is estimated for each individual gene and is used in the final GLM fit. From this plot we see that:
+
+* There is an expected inverse relationship between dispersion and mean expression
+* There is even more shrinkage than the KO analyses, due to the smaller sample sizes per group (only 2 replicates for ctl)
+
+**Still, the data are a good fit for the model, giving us confidence in the results we generate.**
+
+```{r disp-plot, fig.align="center"}
+plotDispEsts(dds)
+```
+
+
+### MA plot 
+The MA plot explores the mean expression level of the genes with the fold change, highlighting the genes that are differentially expressed (padj < 0.05) using colored data points. We hope to see a good number of differentially expressed genes that span the range of expression values. Before and after shrinking are plotted to compare.
+
+**Most genes have fold change values on the lower end**, and are especially low after shrinkage. 
+
+```{r ma-plot, fig.align="center"}
+# Plot with regular FC values
+plotMA(res_unshrunken, alpha = 0.05, main = "Actual LFC")
+
+# Plot shrunken values
+plotMA(res, alpha = 0.05, main = "Shrunken LFC")
+```
+
+
+### Volcano plots
+At a padj < 0.05, we find there are `r nrow(res[which(res$padj < 0.05),])` significant genes identified. Here, we plot the log2 foldchange of the genes against the log10 adjusted p-value. The points highighted in green are genes that have padj < 0.05 and pink are non-significant. 
+
+**Many of the significant genes have fairly smal fold changes.** Some of the top significant genes are labeled, and others that have large fold changes ( > 5 fold). 
+
+```{r volcano-plot, fig.align="center", message=F, warning=F}
+
+res_tb <- res_tb %>% mutate(threshold = padj < 0.05 )
+
+## Volcano plot
+ggplot(res_tb) +
+    geom_point(aes(log2FoldChange, y = -log10(padj), colour = threshold)) +
+    geom_text_repel(aes(x = log2FoldChange, y = -log10(padj), label=ifelse(-log10(padj) > 15 | abs(log2FoldChange) > 5, as.character(gene_name),'')),hjust=0,vjust=0) +
+    xlab("log2 fold change") + 
+    ylab("-log10 adjusted p-value") +
+  theme_bw() +
+    theme(legend.position = "none",
+          plot.title = element_text(size = rel(1.5), hjust = 0.5),
+          axis.title = element_text(size = rel(1.25))) 
+```
+
+## Table of significant DE genes {.tabset}
+By setting a threshold on fold change we can look at some of the genes which are significant and exhibiting large changes between control and OE samples. Below, we have separated genes by direction of expression change and report a few of the statistic columns. *More information on the column headers can be found below.*
+
+### Up-regulated genes
+
+```{r upgenes}
+sigUp <- res_tb %>% 
+  dplyr::filter(padj < 0.05 & log2FoldChange > 1.5) %>% 
+  arrange(desc(log2FoldChange))  %>% 
+  mutate_if(is.numeric, round, digits = 4)
+
+sanitize_datatable(sigUp[,c("ensgene", "gene_name", "description", "baseMean", "log2FoldChange", "pvalue", "padj")])
+```
+
+### Down-regulated genes
+
+```{r downgenes}
+sigDown <- res_tb %>% 
+  dplyr::filter(padj < 0.05 & log2FoldChange < -5) %>% 
+  arrange(log2FoldChange) %>% 
+  mutate_if(is.numeric, round, digits = 4)
+
+sanitize_datatable(sigDown[,c("ensgene", "gene_name", "description", "baseMean", "log2FoldChange", "pvalue", "padj")])
+```
+
+### Heatmap
+At a padj < 0.05, we find there are `r nrow(res[which(res$padj < 0.05),])` significant genes identified. Here, we plot a heatmap displaying expression levels for these genes.
+
+```{r heatmap-de}
+
+sigGenes <- res_tb$ensgene[which(res_tb$threshold)]
+
+### Extract normalized expression for significant genes 
+normalized_counts <- counts(dds, normalized=TRUE)
+norm_sig <- normalized_counts[sigGenes,] 
+meta <- colData(se)[,"group", drop=F] %>% data.frame()
+meta$group <- gsub("_OE", "", meta$group)
+
+### Set a color palette
+heat_colors <- colorRampPalette(c("blue", "black", "yellow"))(100)
+anno_colors <- list(group=c(OE="#20A387FF",control="#453788FF"))
+
+### Run pheatmap using the metadata data frame for the annotation (11 x 5)
+pheatmap(norm_sig, 
+    color = heat_colors, 
+    cluster_rows = T, 
+    show_rownames = F,
+    annotation = meta, 
+    annotation_colors = anno_colors,
+    border_color = NA, 
+    fontsize = 10, 
+    scale = "row", 
+    fontsize_row = 10, 
+    height = 20)
+```
+
+## File Download
+
+Below, we provide a selection of output files from this anlaysis.
+
+1. [**Results from DESeq2 analysis**](./results/OE_vs_control_res_allgenes.csv) These files report DE statistics for all genes that were tested. The result tables are sorted by BH-adjusted P value, and contain the following columns:
+
+- `ensgene`: Ensembl ID for gene
+- `baseMean`: Mean of the normalized counts per gene for all samples.
+- `log2FoldChange`: the shrunken log2 fold change values for VWR relative to sedentary mice
+- `lfcSE`: standard error of the log2 fold changes
+- `stat`: Wald statistic.
+- `pvalue`: Walt test *P* value.
+- `padj`: BH adjusted Wald test *P* value (corrected for multiple comparisons; aka FDR).
+- `symbol`: gene symbol
+- `biotype`: gene biotype
+- `description`: gene description
+
+2. [**Normalized counts**](./results/OE_vs_control_normalized_counts.csv) This file contains the normalized counts (using the median of ratios method) for all genes in all samples.
+
+3. [**rlog transformed counts**](./results/OE_vs_control_rlog_counts.csv) This file contains counts that have been transformed using the `rlog()` function. This function transforms the count data to the log2 scale in a way which minimizes differences between samples for rows with small counts, and which normalizes with respect to library size. The rlog transformation produces a similar variance stabilizing effect as `vst()`. **These are a suitable input for visualization methods.**
+
+4. [**Combined results with normalized counts**](./results/OE_vs_control_res_combined_normcounts.csv)
+
+
+```{r create-dataout, echo=FALSE, eval=FALSE}
+# Write out all results
+write.csv(res_tb, 
+          file = "results/OE_vs_control_res_allgenes.csv",
+          quote=F, row.names = F)
+
+# Write out normalized count matrix
+write.csv(counts(dds, normalized = TRUE),
+          file = "results/OE_vs_control_normalized_counts.csv",
+          quote=F)
+
+# Write out vst matrix
+write.csv(assay(rld),
+          file = "results/OE_vs_control_vst_counts.csv",
+          quote=F)
+
+# Write out combined matrix
+norm_counts <- counts(dds, normalized = TRUE) %>% 
+  data.frame() %>% 
+  rownames_to_column(var="ensgene")
+
+write.csv(left_join(res_tb, norm_counts),
+          file = "results/OE_vs_control_res_combined_normcounts.csv",
+          quote=F)
+
+
+```
+
+
+## R Session 
+Below is the output of the R session used to generate this report. Included is information on R version, OS, and versions of packages installed and used.
+
+```{r sessionInfo}
+
+sessionInfo()
+
+```
+

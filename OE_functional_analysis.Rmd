@@ -1,0 +1,463 @@
+---
+title: | 
+  | Functional analysis: 
+  | OE vs (empty vector) control
+author: "Meeta Mistry"
+contact: mmistry@hsph.harvard.edu
+date: "`r Sys.Date()`"
+output:
+   html_document:
+      code_folding: hide
+      df_print: paged
+      highlights: pygments
+      self_contained: true
+      theme: default
+      toc: true
+      toc_float:
+         collapsed: true
+         smooth_scroll: true
+      fig_width: 6
+      fig_height: 5
+---
+
+## Overview
+
+- Principal Investigator: Eric Greer
+- Researcher: Ken Takashima
+- Experiment: Analysis of microprotein over- and under-expression 
+
+## Project Description
+There are over 5000 predicted microproteins (< 10kDa) in human proteomes, which remain uncharacterized. From labeling experiments the lab has found a huge amount of signal from these small proteins
+
+**Hypothesis:** these small proteins function as histone mimetics, recruiting chromatin modifiers away from the chromatin.
+
+By evaluating homology of these proteins to histone tails, they identified Nop16 to have a high homology for H3K27. Nop16 over expression decreases H3K27me3 modification, and a knockout results in increase in H3K27me3.
+
+**In this experiment, we look at with NOP16 over-expression against empty vector controls, and the biological processes and pathways implicated with the genes that are up- and down-regulated**
+
+
+```{r, cache = FALSE, message = FALSE, warning=FALSE}
+library(tidyverse)
+library(knitr)
+library(ggrepel)
+library(biomaRt)
+library(pheatmap)
+library(RColorBrewer)
+library(AnnotationHub)
+library(ensembldb)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(magick)
+library(cowplot)
+library(pathview)
+library(rrvgo)
+library(msigdbr)
+
+ggplot2::theme_set(theme_light(base_size = 14))
+opts_chunk[["set"]](
+    cache = FALSE,
+    dev = c("png", "pdf"),
+    error = TRUE,
+    highlight = TRUE,
+    message = FALSE,
+    warning =FALSE,
+    prompt = FALSE,
+    tidy = FALSE,
+    fig.align = 'center',
+    warning = FALSE)
+```
+```{r functions, echo=FALSE}
+# Load functions
+sanitize_datatable = function(df, ...) {
+ # remove dashes which cause wrapping
+ DT::datatable(df, ..., rownames=gsub("-", "_", rownames(df)),
+                   colnames=gsub("-", "_", colnames(df)),
+               options = list(scrollX = TRUE,...))
+}
+
+```
+
+# Functional analysis 
+
+We have performed functional analysis using **over-representation analysis** (ORA) and **gene set enrichment analysis** (GSEA) methods. We have performed these methods using gene ontology (GO), Kyoto Encyclopedia of Genes and Genomes (KEGG), and Molecular Signature Databases (MSigDB) gene sets.
+
+```{r fxl_setup}
+# Loading in the data
+results <- read_csv("results/OE_vs_control_res_allgenes.csv")
+
+sig_results <- results %>%
+  dplyr::filter(padj < 0.05) %>%
+  arrange(padj)
+
+# For the over-representation analysis 
+sigUp_genes <- sig_results %>%
+  dplyr::filter(log2FoldChange > 0) %>%
+  pull(ensgene) %>% as.character()
+
+sigDown_genes <- sig_results %>%
+  dplyr::filter(log2FoldChange < 0) %>%
+  pull(ensgene) %>% as.character()
+
+allGenes <- as.character(results$ensgene)
+
+# For the enrcihment map
+d <- GOSemSim::godata("org.Hs.eg.db", ont = "BP")  
+
+```
+
+
+## GO over-representation analysis
+
+Gene Ontology (GO) term over-representation analysis is a technique for interpreting sets of genes making use of the Gene Ontology system of classification, in which genes are assigned to a set of predefined bins depending on their functional characteristics. There are three main categories of terms for the Gene Ontology, the focus on this report will be "Biological Process".  
+
+_**We have run a separate analysis for the up-regulated, down-regulated genes and all significant genes (not separated based on fold-change value).**_
+
+### Up-regulated genes result {.tabset}
+Here, we observe many genes are associated with **terms related to RNA-splicing processes**. Additionally, there are a few **terms related to protein localization** (smaller gene numbers, but of higher significance). 
+
+#### Table of significant GO terms
+
+```{r enrich_go_up}
+
+# Run GO enrichment analysis
+ego <- enrichGO(
+    sigUp_genes,
+    "ENSEMBL",
+    universe = allGenes,
+    OrgDb = org.Hs.eg.db,
+    ont = "BP",
+    pAdjustMethod = "BH",
+    qvalueCutoff = 0.05,
+    readable = TRUE)
+
+saveRDS(ego, file = "results/functional_analyses/OE_vs_ctl/oe_vs_ctl_sigUp_ego.rds")
+
+# Show summary data.frame
+egoSummary <- ego@result
+
+write.csv(egoSummary,
+          file = "results/functional_analyses/OE_vs_ctl/oe_vs_ctl_upGenesgo_ora.csv", 
+          quote = FALSE)
+
+# Display results
+egoSummary %>%  
+  dplyr::select(ID, Description, GeneRatio, BgRatio, pvalue, p.adjust) %>% 
+  mutate_if(is.numeric, round, digits = 6) %>%
+  as_tibble() %>% 
+  sanitize_datatable( style='bootstrap')
+
+```
+
+#### Dotplot of the top 25 significant terms
+
+The dotplot shows the top 25 significant terms ordered on the x-axis by gene ratio (number of significant genes associated with process / total number of significant genes). The size of the dots reflects the number of genes associated with the process, and the p-adjusted value reflects the significance.
+
+```{r dotplot, fig.width=15, fig.height=12}
+# Dotplot of top 25
+dotplot(ego, showCategory = 25)
+```
+
+#### Enrichment map of 50 most significant terms
+
+The enrichment plot clusters together similar GO terms to give more of an overall impression of the categories related to the enriched biological processes. The color of the node depicts the p-adjusted value for the enrichment of the biological process, while the size denotes the number of significant genes associated with the process.
+
+```{r emapplot_go, fig.width=15, fig.height=12}
+  
+cluster_GO_emap <- enrichplot::pairwise_termsim(ego, semData = d,  method="Rel")
+clusterProfiler::emapplot(cluster_GO_emap, showCategory = 50)
+```
+
+### Down-regulated genes result {.tabset}
+For the down-regulated gene set we observe genes to be associated with **cell development and cell growth**, with a few related terms pertaining specifically to neurons and axons. Additionally, there are also genes involved in some **identified signaling pathways**.
+
+#### Table of significant GO terms
+```{r enrich_go_down}
+
+# Run GO enrichment analysis
+ego <- enrichGO(
+    sigDown_genes,
+    "ENSEMBL",
+    universe = allGenes,
+    OrgDb = org.Hs.eg.db,
+    ont = "BP",
+    pAdjustMethod = "BH",
+    qvalueCutoff = 0.05,
+    readable = TRUE)
+
+saveRDS(ego, file = "results/functional_analyses/OE_vs_ctl/oe_vs_ctl_sigDown_ego.rds")
+
+# Show summary data.frame
+egoSummary <- ego@result
+
+write.csv(egoSummary,
+          file = "results/functional_analyses/OE_vs_ctl/oe_vs_ctl_downGenesgo_ora.csv", 
+          quote = FALSE)
+
+# Display results
+egoSummary %>%  
+  dplyr::select(ID, Description, GeneRatio, BgRatio, pvalue, p.adjust) %>% 
+  mutate_if(is.numeric, round, digits = 6) %>%
+  as_tibble() %>% 
+  sanitize_datatable( style='bootstrap')
+```
+
+#### Dotplot of the top 25 significant terms
+
+The dotplot shows the top 25 significant terms ordered on the x-axis by gene ratio (number of significant genes associated with process / total number of significant genes). The size of the dots reflects the number of genes associated with the process, and the p-adjusted value reflects the significance.
+
+```{r dotplot-down, fig.width=15, fig.height=12}
+# Dotplot of top 25
+dotplot(ego, showCategory = 25)
+```
+
+#### Enrichment map of 50 most significant terms
+
+The enrichment plot clusters together similar GO terms to give more of an overall impression of the categories related to the enriched biological processes. The color of the node depicts the p-adjusted value for the enrichment of the biological process, while the size denotes the number of significant genes associated with the process.
+
+```{r emapplot_go_down, fig.width=15, fig.height=12}
+  
+cluster_GO_emap <- enrichplot::pairwise_termsim(ego, semData = d,  method="Rel")
+clusterProfiler::emapplot(cluster_GO_emap, showCategory = 50)
+```
+
+### All significant genes {.tabset}
+Finally, it is also worth exploring the over-representation analysis reports using the full list of significant genes as input. In this way we have a larger gene set as input, and there is no bias/influence towards the direction of expression change.
+
+**We observe some combination of the terms observed for the separated gene lists, but it is mostly driven by the down-regulated terms.** 
+
+#### Table of significant GO terms
+```{r enrich_go}
+
+# Run GO enrichment analysis
+ego <- enrichGO(
+    as.character(sig_results$ensgene),
+    "ENSEMBL",
+    universe = allGenes,
+    OrgDb = org.Hs.eg.db,
+    ont = "BP",
+    pAdjustMethod = "BH",
+    qvalueCutoff = 0.05,
+    readable = TRUE)
+
+saveRDS(ego, file = "results/functional_analyses/OE_vs_ctl/oe_vs_ctl_functional_ego.rds")
+
+# Show summary data.frame
+egoSummary <- ego@result
+
+write.csv(egoSummary,
+          file = "results/functional_analyses/OE_vs_ctl/oe_vs_ctl_allGenesgo_ora.csv", 
+          quote = FALSE)
+
+# Display results
+egoSummary %>%  
+  dplyr::select(ID, Description, GeneRatio, BgRatio, pvalue, p.adjust) %>% 
+  mutate_if(is.numeric, round, digits = 6) %>%
+  as_tibble() %>% 
+  sanitize_datatable( style='bootstrap')
+
+```
+
+#### Dotplot of the top 25 significant terms
+
+The dotplot shows the top 25 significant terms ordered on the x-axis by gene ratio (number of significant genes associated with process / total number of significant genes). The size of the dots reflects the number of genes associated with the process, and the p-adjusted value reflects the significance. **The top terms identified, match with what we observed with the down-regulated genes.** To get a perpective on the whole list of terms, the treemap plotted in the last tab is helpful.
+
+```{r dotplot-all, fig.width=15, fig.height=12}
+# Dotplot of top 25
+dotplot(ego, showCategory = 25)
+```
+
+#### Treemap plot
+Since we have many more GO terms identified with the full results, a treemap visualization is useful. Treemaps can help with the interpretation of the summarized results by collapsing results into overarching themes.The **terms are grouped (colored) based on their parent, and the space used by the term is proportional to the score**. The score used here is the p-adjusted values. 
+
+```{r revigo-treemap}
+##Revigo
+
+# First step is to get the similarity matrix between terms
+simMatrix <- calculateSimMatrix(egoSummary$ID,
+                                orgdb="org.Hs.eg.db",
+                                ont="BP",
+                                method="Rel")
+# scores are interpreted in the direction that higher are better, therefore if you use p-values as scores, minus log-transform them before
+scores <- setNames(-log10(egoSummary$p.adjust), egoSummary$ID)
+
+# reduceSimMatrix selects as the group representative the term with the higher score within the group.
+reducedTerms <- reduceSimMatrix(simMatrix,
+                                scores,
+                                threshold=0.7,
+                                orgdb="org.Hs.eg.db")
+
+# plot treemap
+treemapPlot(reducedTerms)
+```
+
+
+## GSEA analysis
+For gene set enrichment analysis using clusterProfiler, **coordinated differential expression over gene sets is tested instead of changes of individual genes**. The hypothesis is that although large changes in individual genes can have significant effects on pathways (and will be detected via ORA methods), **weaker but coordinated changes in sets of functionally related genes (i.e., pathways) can also have significant effects**. Thus, rather than setting an arbitrary threshold to identify 'significant genes', all genes are considered in the analysis. We will do this by using different gene sets as input.
+
+```{r gsea-setup}
+
+# Query AnnotationHub
+ah <- AnnotationHub()
+human_ens <- query(ah, c("Homo sapiens", "EnsDb"))
+
+# Extract annotations of interest
+human_ens <- human_ens[["AH83216"]]
+
+# Create a gene-level dataframe 
+annotations_ahb <- genes(human_ens, return.type = "data.frame")  %>%
+  dplyr::select(gene_id, gene_name, entrezid, gene_biotype, description) %>% 
+  dplyr::filter(gene_id %in% results$ensgene)
+
+
+# Keep one entrez Id per gene
+annotations_ahb$entrezid <- map(annotations_ahb$entrezid,1) %>%  unlist()
+
+# Merge in entrez ids
+all_genes <- inner_join(results,
+                       annotations_ahb[,c("gene_id", "entrezid")],
+                       by = c("ensgene" = "gene_id"))
+
+
+
+# Remove all NA values and only keep unique IDs
+allEntrez <- all_genes[which(duplicated(all_genes$entrezid) == FALSE), ]
+allEntrez <- allEntrez[which(!(is.na(allEntrez$entrezid))), ]
+
+all_entrez_names <- allEntrez$entrezid %>% 
+  as.character()
+  
+# Named list of log2 foldchanges
+allEntrez_fc <- allEntrez$log2FoldChange
+names(allEntrez_fc) <- allEntrez$entrezid
+
+# Sort by fold change values
+allEntrez_fc <- sort(allEntrez_fc, decreasing = TRUE)
+
+```
+
+
+### KEGG
+We will start with the [KEGG Pathway database](https://www.genome.jp/kegg/pathway.html), a collection of manually drawn pathway maps for various processes. There were only **four pathways identified as significant, and are listed below**. 
+
+* PI3K-Akt signaling pathway
+* ECM-receptor interaction
+* Focal adhesion
+* Ribosome
+
+#### ECM-receptor interaction pathway
+We can use the pathview package to illustrate the **ECM-receptor interaction** pathway as an example, highlighting which genes show change in expression. *The genes colored in the pathways below represent the log2 fold changes for the genes in the pathway driving the enrichment (not only significant genes).*
+
+```{r gsea_kegg, eval=FALSE}
+
+# GSEA using gene sets from KEGG pathways
+gseaKEGG <- gseKEGG(
+    geneList = allEntrez_fc,
+    organism = "hsa",
+    pvalueCutoff = 0.05,
+    verbose = FALSE)
+saveRDS(gseaKEGG, file = "results/functional_analyses/OE_vs_ctl/oe_vs_ctl_kegg_gsea.rds")
+
+write.csv(gseaKEGG@result,
+          file = "results/functional_analyses/OE_vs_ctl/oe_vs_ctl_kegg_gsea.csv", 
+          quote = FALSE)
+```
+
+```{r kegg_gsea_images, message=FALSE, warning=FALSE, eval=FALSE, echo=FALSE}
+# If there is an error at this step, there may be a pathway that is not found by
+# pathview package. In this case, you may need to run the pathview command above
+# by specifying the index of the pathways you would like to print out in place
+# of `x`.
+pathways <- gseaKEGG@result$ID
+
+for (pathway in pathways){
+pathview(gene.data = allEntrez_fc,
+            pathway.id = pathway,
+            species = "hsa",
+            limit = list(gene = 2, cpd = 1))
+}
+```
+
+```{r draw-pathview}
+gseKEGG <- read_rds("results/functional_analyses/OE_vs_ctl/oe_vs_ctl_kegg_gsea.rds")
+keggPlotsDir <- "results/functional_analyses/OE_vs_ctl/kegg_pathway_images_gsea/"
+
+img <- image_read(paste0(keggPlotsDir, "/hsa04512.pathview.png"))
+print(ggdraw() +
+    draw_image(img))
+```
+
+
+### Molecular Signature Database (MSigDB)
+The Molecular Signatures Database is a collection of annotated gene sets for use with GSEA software. The gene sets are divided into [9 major collections, and several sub-collections](https://www.gsea-msigdb.org/gsea/msigdb/collections.jsp)
+
+
+#### Curated gene sets (C2)
+For this analysis, we will try the curated gene sets (C2). Gene sets in this collection are curated from various sources, including online pathway databases and the biomedical literature. Many sets are also contributed by individual domain experts.
+
+In the results, we don't get too many more significant sets. There is some overlap with the KEGG results (e.g. ECM Receptor interaction, Focal adhesion, PI3K-Akt signaling). All significant results are listed in the table below.
+
+
+```{r misgdb-setup, eval=FALSE}
+# msigdbr_show_species()
+
+# Curated gene sets
+msigdb_c2 <- msigdbr(species = "Homo sapiens", category = "C2") %>% 
+  dplyr::select(gs_name, entrez_gene)
+
+# Run GSEA
+gseMsigC2 <- GSEA(allEntrez_fc, TERM2GENE = msigdb_c2)# Display results
+
+# Save files
+saveRDS(gseMsigC2, file = "results/functional_analyses/OE_vs_ctl/oe_vs_ctl_MSigC2_gsea.rds")
+write.csv(gseMsigC2@result,
+          file = "results/functional_analyses/OE_vs_ctl/oe_vs_ctl_MsigDB_C2_gsea.csv", 
+          quote = FALSE)
+```
+
+```{r msig-results}
+
+gseMsigC2 <- readRDS("results/functional_analyses/OE_vs_ctl/oe_vs_ctl_MSigC2_gsea.rds")
+
+# Display results
+gseMsigC2@result %>%
+  dplyr::select(setSize, enrichmentScore, NES, pvalue, p.adjust) %>% 
+  mutate_if(is.numeric, round, digits = 6) %>%
+  sanitize_datatable( style='bootstrap')
+```
+
+#### GSEA plot: ECM Receptor interaction
+
+We can also plot the GSEA plot for a single enriched gene set of interest. Here, we have chosen the ECM Receptor interaction gene set to complement the figure above. We can see that there are many genes from this gene set that appear to donw-regulated in our dataset.
+
+
+```{r gsea-plot}
+gseaplot(gseMsigC2, 
+         "KEGG_ECM_RECEPTOR_INTERACTION", 
+         by = "runningScore", 
+         title = "ECM_RECEPTOR_INTERACTION")
+```
+
+
+_**NOTE: These plots can be created for any enriched gene set!**_
+
+## Download Files
+We have provided the CSV files containing the results for the various functional analyses performed in this report in addition to some of the pathview images for the KEGG GSEA results:
+
+* **Gene Ontology ORA results** (Biological Process)
+  * [Up-regulated genes](results/oe_vs_ctl_upGenesgo_ora.csv)
+  * [Down-regulated genes](results/oe_vs_ctl_downGenesgo_ora.csv)
+  * [All significant genes](results/oe_vs_ctl_allGenesgo_ora.csv)
+* **GSEA KEGG** [results file](results/oe_vs_ctl_kegg_gsea.csv)
+* **GSEA KEGG pathview images**
+  * [PI3K-Akt signaling pathway](results/kegg_pathway_images_gsea/hsa04151.pathview.png)
+  * [ECM-receptor interaction](results/kegg_pathway_images_gsea/hsa04512.pathview.png)
+  * [Focal adhesion](results/kegg_pathway_images_gsea/hsa04510.pathview.png)
+  * [Ribosome](results/kegg_pathway_images_gsea/hsa03010.pathview.png)
+* **GSEA MSigDB** [results file](results/oe_vs_ctl_MsigDB_C2_gsea.csv)
+
+
+## Session information
+
+```{r sessionInfo}
+sessionInfo()
+```
