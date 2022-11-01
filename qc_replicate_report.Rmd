@@ -1,0 +1,675 @@
+---
+title: "Greer - H3K27me3 ChIP-seq analysis"
+author: "Meeta Mistry"
+date: "`r Sys.Date()`"
+output:
+   html_document:
+      code_folding: hide
+      highlights: pygments
+      theme: default
+      toc: true
+      toc_float:
+         collapsed: true
+         smooth_scroll: true
+---
+
+
+## Overview
+
+- Principal Investigator: Eric Greer
+- Experiment: Analysis of microprotein over- and under-expression 
+
+## Project Description
+There are over 5000 predicted microproteins (< 10kDa) in human proteomes, which remain uncharacterized. From labeling experiments the lab has found a huge amount of signal from these small proteins
+
+**Hypothesis:** these small proteins function as histone mimetics, recruiting chromatin modifiers away from the chromatin.
+
+By evaluating homology of these proteins to histone tails, they identified Nop16 to have a high homology for H3K27. Nop16 over expression decreases H3K27me3 modification, and a knockout results in increase in H3K27me3.
+
+
+```{r functions, echo=FALSE}
+# Load functions
+sanitize_datatable = function(df, ...) {
+ # remove dashes which cause wrapping
+ DT::datatable(df, ..., rownames=gsub("-", "_", rownames(df)),
+                   colnames=gsub("-", "_", colnames(df)))
+}
+
+```
+
+```{r set-random-seed}
+# set seed for reproducibility
+set.seed(1454944673)
+```
+
+```{r, cache = FALSE, message = FALSE, eval=FALSE}
+# Reference files used in bcbio: hg19
+#_______________________________
+
+# deeptools 3.5.0
+
+# cd /n/data1/cores/bcbio/PIs/eric_greer/greer_rnaseq_cutnrun_analysis_of_microprotein_hbc04238/cutnrun/bcbio_output
+
+# multiBamSummary bins --bamfiles */*ready.bam -o deeptools/multiBAMsummary.npz --smartLabels --outRawCounts deeptools/multiBAMsummary.tab
+
+```
+
+## Setup
+### Bioconductor and R libraries used
+
+```{r libraries, echo=TRUE}
+loadlibs <- function(){
+
+library(tidyverse)
+library(reshape)
+library(pheatmap)
+library(RColorBrewer)
+library(DT)
+library(ggrepel)
+library(viridis)
+library(ChIPpeakAnno)
+library(TxDb.Hsapiens.UCSC.hg19.knownGene)
+library(Repitools)
+library(knitr)
+}
+suppressPackageStartupMessages(loadlibs())
+
+# Set working directory
+baseDir="/Users/mem205/Dropbox (Harvard University)/HBC Team Folder (1)/Consults/eric_greer/cutnrun_analysis_of_microprotein_hbc04238"
+setwd(baseDir)
+```
+
+## QC metrics
+First, we evaluate various QC metrics for the data to assess the sample level quality.
+
+* **Total reads**: total number of reads in the FASTQ file.
+* **Mapped reads**: total number of reads mapping to the genome.
+* **RiP**: percentage of reads that are found to be mapping in regions called peaks. It can be considered a "signal-to-noise" measure of what proportion of the library consists of fragments from binding sites vs. background reads. These values can vary depending on the proetin of interest:
+    * A typical good quality TF (sharp/narrow peaks) with successful enrichment would exhibit a RiP around 5% or higher.
+    * A good quality Pol2 (mix of sharp/narrow and dispersed/broad peaks) would exhibit a RiP of 30% or higher.
+    * There are also known examples of good datasets with RiP < 1% (i.e. RNAPIII or a protein that binds few sites).
+
+Two metrics for evaluating library complexity and identifying potential over amplification by PCR are the non-redunant fraction (NRF) and the PCR bottlenecking coefficient (PBC). More detail on how each is computed is provided below. **Higher values of both NRF and PBC both indicate sequencing libraries with greater complexity.**
+
+* **PCR Bottleneck Coefficient**: PBC is the number of locations with exactly one uniquely mapped read divided by the number of unique locations. 
+* **Non-redunant fraction**: This is the ratio of the 'unique locations' count to the total read count. The 'unique locations' is the number of genomic locations with one or more uniquely mapped reads.
+
+***NOTE:*** *The complexity metrics presented include those that are recommended as the ChIP-seq standards on the [ENCODE website](https://www.encodeproject.org/data-standards/terms/#library). We use these guidelines to determine the level of bottlenecking and complexity. PBC2 is a variant of PBC.*
+ 
+<p align="center">
+<img src="img/encode_standards.png" width="800">
+</p>
+
+```{r load-metadata}
+meta <- read.delim("multiqc/multiqc_data/multiqc_bcbio_metrics.txt", sep="\t")
+
+# Wrangle the metadata
+meta$shortname <- gsub("X2020-10-27-CUTRUN-KT-MB231-[0-9][0-9]-", "", meta$Sample)
+meta$PBC1 <- round(meta$PBC1, digits = 2)
+meta$PBC2 <- round(meta$PBC2, digits = 2)
+meta$NRF <- round(meta$NRF, digits = 2)
+meta$Total_reads <- round(meta$Total_reads * 10e-7, digits=1)
+meta$Mapped_reads <- round(meta$Mapped_reads * 10e-7, digits=1)
+
+# Add some additional sample info
+meta$phenotype <- "IP"
+meta$phenotype[grep("IgG", meta$shortname)] <- "IgG"
+meta$group <- "KO"
+meta$group[grep("EV", meta$shortname)] <- "EV"
+meta$group[grep("OE", meta$shortname)] <- "OE"
+meta$group[grep("ng", meta$shortname)] <- "ng"
+
+overview <- meta %>% 
+  dplyr::select(shortname, Total_reads, Mapped_reads, PBC1, PBC2, bottlenecking, NRF, complexity, RiP_pct) 
+  
+sanitize_datatable(overview, style='bootstrap')
+```
+
+### QC Metrics Summary
+
+* **Total reads:** Generally the sequence depth for samples is good and pretty consistent across samples (~40-50M). 
+* **Mapped reads:** Pretty good mapping rate for all samples (> 80%).
+* **% RiP:** these numbers are also pretty high across all samples.
+* **Complexity:** Based on the NRF values, the samples have an acceptable level of complexity and there appears no concerning amount of PCR duplication.
+
+
+## Correlation heatmap {.tabset}
+Next, we take the count matrix for binned regions across the genome and we computing sample-to-sample correlations. These correlations are visualized using a heatmap; one with all samples and another with only the IP samples.
+
+### All samples
+In this figure, we observe a large amount of variability between IP and input samples as expected.
+
+```{r heatmap-all, fig.height=6, fig.width=6, fig.align='center'}
+
+# Read in data
+counts <- read.delim("data/multiBAMsummary.tab", sep="\t")
+
+# remove genomic coordinate info
+plot_counts <- data.frame(counts[, 4:ncol(counts)])
+
+# Change column names
+colnames(plot_counts) <- colnames(plot_counts) %>% 
+  str_replace( "X.X2020.10.27.CUTRUN.KT.MB231.[0-9][0-9].", "") %>% 
+  str_replace(".ready.", "") %>% 
+  str_replace_all("\\.", "-")
+
+#all(meta$shortname %in% colnames(plot_counts))
+plot_counts <- plot_counts[,meta$shortname]
+
+# Set annotation and colors
+annotation <- meta[,c("phenotype", "group")]
+rownames(annotation) <- meta$shortname
+heat.colors <- brewer.pal(6, "YlOrRd")
+
+pheatmap(cor(plot_counts), color=heat.colors, annotation=annotation)
+
+```
+
+### IP samples only
+By removing the largest source of variance in the data (IgG samples), we observe more clear relationships between the IP samples. **We observe that not only do the samples cluster by group, but also that the respective controls with the KO and OE.**
+
+```{r heatmap-IP, fig.height=6, fig.width=6, fig.align='center'}
+
+#all(meta$Sample %in% colnames(plot_counts))
+plot_ip <- plot_counts[,which(annotation$phenotype != "IgG")]
+
+# Set annotation and colors
+annotation_ip <- annotation[which(annotation$phenotype != "IgG"), "group", drop=F]
+heat.colors <- brewer.pal(6, "YlOrRd")
+
+pheatmap(cor(plot_ip), 
+         color=heat.colors, 
+         annotation=annotation_ip,
+         show_colnames = F)
+```
+
+
+## PCA {.tabset}
+Using that same count matrix, we can run PCA to evaluate the variation amongst our samples and whether or not the greatest sources of variation in the data (PC1 and PC2) can be attributed to the four groups in this experiment.
+
+### All samples
+With all samples, we observe the largest amount of variation is attributed to IP versus input. This is expected, and also what we observed with the correlation heatmaps.
+
+```{r pca-all, warning=FALSE, message=FALSE}
+
+# Compute principal components
+pc <- prcomp(t(plot_counts))
+plot_pca <- data.frame(pc$x, meta)
+plot_pca$group <- factor(annotation[,1])
+
+# Plot with sample names used as data points
+ggplot(plot_pca) + 
+  theme_bw() +
+  geom_point( aes(PC1, PC2, color = group, shape = phenotype), size =3) +
+  xlab('PC1 (64% of variance)') +
+  ylab('PC2 (18% of variance)') +
+  scale_x_continuous(expand = c(0.3,  0.3)) +
+  theme(plot.title = element_text(size = rel(1.5)),
+        axis.title = element_text(size = rel(1.5)),
+        axis.text = element_text(size = rel(1.25)))
+```
+
+### IP samples only
+By removing the IgG samples we see a similar clustering of samples that was observed with the correlation heatmaps.
+
+```{r pca-ip, warning=FALSE, message=FALSE}
+# Compute pca
+pc <- prcomp(t(plot_ip))
+plot_pca <- data.frame(pc$x, meta[which(meta$shortname %in% rownames(pc$x)),])
+
+# Plot with sample names used as data points
+ggplot(plot_pca) + 
+  theme_bw() +
+  geom_point( aes(PC1, PC2, color = group), size=3) +
+  xlab('PC1 (53% of variance)') +
+  ylab('PC2 (16% of variance)') +
+  scale_x_continuous(expand = c(0.3,  0.3)) +
+  theme(plot.title = element_text(size = rel(1.5)),
+        axis.title = element_text(size = rel(1.5)),
+        axis.text = element_text(size = rel(1.25)))
+```
+
+
+## Replicate Concordance {.tabset}
+As with any high-throughput experiment, a single assay is often subject to a substantial amount of variability. Thus, it is highly recommended to setup your experimental design with a minimum of 2-3 biological replicates. Presumably, replicates measuring the same underlying biology should have high consistency but that is not always the case. Here, we generate two plots to evaluate the concordance across replicates. Each tab corresponds to a different sample group.
+
+* **Peak rank versus Peak enrichment:** In this plot, we are looking at each individual replicates to evaluate what number of peaks we would retain if thresholding by peak enrichment. It is also valuable to see how this differs between replicates within a sample group.  
+* **Overlapping peaks:** The venn diagram gives us a representation of the number of peaks overlapping between the replicates. If there is a minimum of 1bp overlap between regions, then it is counted for one overlap. If multiple peaks are overlapping between two samples, `connectedPeaks = "merge"` will only add 1 to the overlapping counts.
+
+### Over-expression samples
+```{r replicates-oe}
+reps <- meta$Sample[which(meta$group == "OE" &
+                            meta$phenotype == "IP")]
+vars <- str_extract(reps, "S[0-9]{1,2}")
+```
+
+#### Total number of peaks
+
+```{r totalpeaks-oe, warning=FALSE, message=FALSE}
+# Obtain the peak enrichment from each replicate
+for(r in 1:length(reps)){
+  peaks <- read.delim(paste0("data/macs2/", reps[r], "_peaks.broadPeak"), header = FALSE)
+  df <- data.frame(peak_enrichment = peaks$V7, peak_rank = rank(dplyr::desc(peaks$V7))) %>% 
+  dplyr::arrange(peak_rank) 
+  assign(vars[r], df)
+}
+
+peakNums <- sapply(vars, function(x){
+  x <- get(x) %>% nrow()
+  return(x)
+}) %>% data.frame() %>% 
+  dplyr::rename("TotalPeaks" = ".")
+
+kable(peakNums, format = 'markdown')
+```
+
+#### Peak enrichment vs. Peak rank
+
+```{r replicates-peakEnrich-oe, warning=FALSE, message=FALSE, fig.width=7, fig.height=4, fig.align='center'}
+
+# Plot using all of the data
+allreps <- bind_rows("S12" = S12, 
+                     "S13" = S13,
+                     "S16" = S16,
+                     "S17" = S17,
+                     "S18" = S18,
+                     .id = "reps")
+
+ggplot(allreps, aes(peak_rank, peak_enrichment, color = reps)) + 
+  geom_line() +
+  ggtitle("H3K27me3 OE samples") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank()) +
+  xlab("Peak rank") + ylab("Peak enrichment")
+
+```
+
+#### Peak overlap between replicates 
+
+```{r replicates-peakOverlap-oe, warning=FALSE, message=FALSE, fig.align='center'}
+
+# Reassign reps so that they are now GRanges
+for(r in 1:length(reps)){
+  obj <- ChIPpeakAnno::toGRanges(paste0("data/macs2/", reps[r], "_peaks.broadPeak"), format="broadPeak", header=FALSE)  
+  assign(vars[r], obj)
+}
+
+# Find overlapping peaks
+# maxgap defaults to -1 which means that two ranges overlap by at least 1 bp
+# connectedpeaks examples (https://support.bioconductor.org/p/133486/#133603), if 5 peaks in group1 overlap with 2 peaks in group 2, setting connectedPeaks to "merge" will add 1 to the overlapping counts
+
+olaps <- findOverlapsOfPeaks(S12, S13, S16, S17, S18, connectedPeaks="merge")
+
+venstats <- makeVennDiagram(olaps, totalTest=3e+3, connectedPeaks = "merge",
+    fill=c("#CC79A7", "#56B4E9", "#F0E442", "#90EE90", "#CBC3E3"), # circle fill color
+    col=c("#D55E00", "#0072B2", "#E69F00", "#00FF00", "#800080"), #circle border color
+                cat.col=c("#D55E00", "#0072B2", "#E69F00", "#E69F00", "#E69F00"))
+
+# Output consensus peaks
+out <- olaps$peaklist$`S12///S13///S16///S17///S18` 
+write.table(annoGR2DF(out)[,1:4], file = "results/consensus_peaks/H3K27me3_OE_consensus.bed", quote=F, row.names=F, sep="\t")
+```
+
+### Empty vector controls 
+```{r replicates-ev}
+reps <- meta$Sample[which(meta$group == "EV" &
+                            meta$phenotype == "IP")]
+vars <- str_extract(reps, "S[0-9]{1,2}")
+```
+
+#### Total number of peaks
+
+```{r totalpeaks-ev, warning=FALSE, message=FALSE}
+# Obtain the peak enrichment from each replicate
+for(r in 1:length(reps)){
+  peaks <- read.delim(paste0("data/macs2/", reps[r], "_peaks.broadPeak"), header = FALSE)
+  df <- data.frame(peak_enrichment = peaks$V7, peak_rank = rank(dplyr::desc(peaks$V7))) %>% 
+  dplyr::arrange(peak_rank) 
+  assign(vars[r], df)
+}
+
+peakNums <- sapply(vars, function(x){
+  x <- get(x) %>% nrow()
+  return(x)
+}) %>% data.frame() %>% 
+  dplyr::rename("TotalPeaks" = ".")
+
+kable(peakNums, format = 'markdown')
+```
+
+#### Peak enrichment vs. Peak rank
+
+```{r replicates-peakEnrich-ev, warning=FALSE, message=FALSE, fig.width=7, fig.height=4, fig.align='center'}
+
+# Plot using all of the data
+allreps <- bind_rows("S4" = S4, 
+                     "S5" = S5,
+                     "S6" = S6,
+                     .id = "reps")
+
+
+ggplot(allreps, aes(peak_rank, peak_enrichment, color = reps)) + 
+  geom_line() +
+  ggtitle("EV control reps") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank()) +
+  xlab("Peak rank") + ylab("Peak enrichment")
+
+```
+
+#### Peak overlap between replicates 
+
+```{r replicates-peakOverlap-ev, warning=FALSE, message=FALSE, fig.align='center'}
+
+# Reassign reps so that they are now GRanges
+for(r in 1:length(reps)){
+  obj <- ChIPpeakAnno::toGRanges(paste0("data/macs2/", reps[r], "_peaks.broadPeak"), format="broadPeak", header=FALSE)  
+  assign(vars[r], obj)
+}
+
+# Find overlapping peaks
+# maxgap defaults to -1 which means that two ranges overlap by at least 1 bp
+# connectedpeaks examples (https://support.bioconductor.org/p/133486/#133603), if 5 peaks in group1 overlap with 2 peaks in group 2, setting connectedPeaks to "merge" will add 1 to the overlapping counts
+
+olaps <- findOverlapsOfPeaks(S4, S5, S6, connectedPeaks="merge")
+
+venstats <- makeVennDiagram(olaps, totalTest=3e+3, connectedPeaks = "merge",
+                fill=c("#CC79A7", "#56B4E9", "#F0E442"), # circle fill color
+                col=c("#D55E00", "#0072B2", "#E69F00"), #circle border color
+                cat.col=c("#D55E00", "#0072B2", "#E69F00"))
+
+# Output consensus peaks
+out <- olaps$peaklist$`S4///S5///S6` 
+write.table(annoGR2DF(out)[,1:4], file = "results/consensus_peaks/H3K27me3_EV_consensus.bed", quote=F, row.names=F, sep="\t")
+```
+
+
+### Knockout samples
+
+```{r replicates-ko}
+reps <- meta$Sample[which(meta$group == "KO" &
+                            meta$phenotype == "IP")]
+vars <- str_extract(reps, "S[0-9]{1,2}")
+```
+
+#### Total number of peaks
+
+```{r totalpeaks-ko, warning=FALSE, message=FALSE}
+# Obtain the peak enrichment from each replicate
+for(r in 1:length(reps)){
+  peaks <- read.delim(paste0("data/macs2/", reps[r], "_peaks.broadPeak"), header = FALSE)
+  df <- data.frame(peak_enrichment = peaks$V7, peak_rank = rank(dplyr::desc(peaks$V7))) %>% 
+  dplyr::arrange(peak_rank) 
+  assign(vars[r], df)
+}
+
+peakNums <- sapply(vars, function(x){
+  x <- get(x) %>% nrow()
+  return(x)
+}) %>% data.frame() %>% 
+  dplyr::rename("TotalPeaks" = ".")
+
+kable(peakNums, format = 'markdown')
+```
+
+#### Peak enrichment vs. Peak rank
+
+```{r replicates-peakEnrich-ko, warning=FALSE, message=FALSE, fig.width=7, fig.height=4, fig.align='center'}
+
+# Plot using all of the data
+allreps <- bind_rows("S11" = S11, 
+                     "S19" = S19,
+                     "S20" = S20,
+                     "S22" = S22, 
+                     "S23" = S23,
+                     "S24" = S24,
+                     .id = "reps")
+
+
+ggplot(allreps, aes(peak_rank, peak_enrichment, color = reps)) + 
+  geom_line() +
+  ggtitle("Knockout reps") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank()) +
+  xlab("Peak rank") + ylab("Peak enrichment")
+
+```
+
+#### Peak overlap between replicates 
+
+```{r replicates-peakOverlap-ko, warning=FALSE, message=FALSE, fig.align='center'}
+
+# Reassign reps so that they are now GRanges
+for(r in 1:length(reps)){
+  obj <- ChIPpeakAnno::toGRanges(paste0("data/macs2/", reps[r], "_peaks.broadPeak"), format="broadPeak", header=FALSE)  
+  assign(vars[r], obj)
+}
+
+# Find overlapping peaks
+# maxgap defaults to -1 which means that two ranges overlap by at least 1 bp
+# connectedpeaks examples (https://support.bioconductor.org/p/133486/#133603), if 5 peaks in group1 overlap with 2 peaks in group 2, setting connectedPeaks to "merge" will add 1 to the overlapping counts
+
+olaps1 <- findOverlapsOfPeaks(S11, S19, S20, 
+                             connectedPeaks="merge")
+olaps2 <- findOverlapsOfPeaks(S22, S23, S24,
+                             connectedPeaks="merge")
+
+venstats1 <- makeVennDiagram(olaps1, totalTest=3e+3, connectedPeaks = "merge",
+                fill=c("#CC79A7", "#56B4E9", "#F0E442"), # circle fill color
+                col=c("#D55E00", "#0072B2", "#E69F00"), #circle border color
+                cat.col=c("#D55E00", "#0072B2", "#E69F00"))
+venstats2 <- makeVennDiagram(olaps2, totalTest=3e+3, connectedPeaks = "merge",
+                fill=c("#CC79A7", "#90EE90", "#CBC3E3"), # circle fill color
+                col=c("#D55E00", "#00FF00", "#800080"), #circle border color
+                cat.col=c("#D55E00", "#00FF00", "#800080"))
+
+
+# Output consensus peaks
+out <- olaps1$peaklist$`S11///S19///S20` 
+write.table(annoGR2DF(out)[,1:4], file = "results/consensus_peaks/H3K27me3_KO_S11_S19_S20_consensus.bed", quote=F, row.names=F, sep="\t")
+
+out <- olaps2$peaklist$`S22///S23///S24` 
+write.table(annoGR2DF(out)[,1:4], file = "results/consensus_peaks/H3K27me3_KO_S22_S23_S24_consensus.bed", quote=F, row.names=F, sep="\t")
+
+```
+
+### ngRNA controls
+
+```{r replicates-ng}
+reps <- meta$Sample[which(meta$group == "ng" &
+                            meta$phenotype == "IP")]
+vars <- str_extract(reps, "S[0-9]{1,2}")
+```
+
+#### Total number of peaks
+
+```{r totalpeaks-ng, warning=FALSE, message=FALSE}
+# Obtain the peak enrichment from each replicate
+for(r in 1:length(reps)){
+  peaks <- read.delim(paste0("data/macs2/", reps[r], "_peaks.broadPeak"), header = FALSE)
+  df <- data.frame(peak_enrichment = peaks$V7, peak_rank = rank(dplyr::desc(peaks$V7))) %>% 
+  dplyr::arrange(peak_rank) 
+  assign(vars[r], df)
+}
+
+peakNums <- sapply(vars, function(x){
+  x <- get(x) %>% nrow()
+  return(x)
+}) %>% data.frame() %>% 
+  dplyr::rename("TotalPeaks" = ".")
+
+kable(peakNums, format = 'markdown')
+```
+
+#### Peak enrichment vs. Peak rank
+
+```{r replicates-peakEnrich-ng, warning=FALSE, message=FALSE, fig.width=7, fig.height=4, fig.align='center'}
+
+# Plot using all of the data
+allreps <- bind_rows("S3" = S3, 
+                     "S8" = S8,
+                     "S9" = S9,
+                     .id = "reps")
+
+ggplot(allreps, aes(peak_rank, peak_enrichment, color = reps)) + 
+  geom_line() +
+  ggtitle("ng knockout control reps") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank()) +
+  xlab("Peak rank") + ylab("Peak enrichment")
+
+```
+
+#### Peak overlap between replicates 
+
+```{r replicates-peakOverlap-ng, warning=FALSE, message=FALSE, fig.align='center'}
+
+# Reassign reps so that they are now GRanges
+for(r in 1:length(reps)){
+  obj <- ChIPpeakAnno::toGRanges(paste0("data/macs2/", reps[r], "_peaks.broadPeak"), format="broadPeak", header=FALSE)  
+  assign(vars[r], obj)
+}
+
+# Find overlapping peaks
+# maxgap defaults to -1 which means that two ranges overlap by at least 1 bp
+# connectedpeaks examples (https://support.bioconductor.org/p/133486/#133603), if 5 peaks in group1 overlap with 2 peaks in group 2, setting connectedPeaks to "merge" will add 1 to the overlapping counts
+
+olaps <- findOverlapsOfPeaks(S3, S8, S9, connectedPeaks="merge")
+
+venstats <- makeVennDiagram(olaps, totalTest=3e+3, connectedPeaks = "merge",
+                fill=c("#CC79A7", "#56B4E9", "#F0E442"), # circle fill color
+                col=c("#D55E00", "#0072B2", "#E69F00"), #circle border color
+                cat.col=c("#D55E00", "#0072B2", "#E69F00"))
+
+# Output consensus peaks
+out <- olaps$peaklist$`S3///S8///S9` 
+write.table(annoGR2DF(out)[,1:4], file = "results/consensus_peaks/H3K27me3_ng_consensus.bed", quote=F, row.names=F, sep="\t")
+```
+
+
+
+## {-}
+
+### Replicate summary 
+
+* **Overexpression samples:** For this group we have a total of 5 replicates, each with ~80K peaks being called. The signal plot shows there is some variability in the level of peak enrichment, but generally the trend is concordant. Enrichment values don't drop off until about 70K peaks suggesting these are all pretty strong replicates. The Venn diagram indicates that there are a total of 25,217 peaks that exist in all five replicates (with a 1 bp overlap).
+* **Empty vector controls:** There are fewer replicates here, but a similar number of peaks compared to the overexpression group. The max enrichment scores for the top ranked peaks are slightly lower, but the remaining peaks are similar to overexpression samples (~4 is where we see the plateau). These are all pretty strong replicates. The Venn diagram indicates that there are a total of 37,713 peaks that exist in all five replicates (with a 1 bp overlap).
+* **Knockout samples:** This group has the largest number of replicates, but also a large amount of variability between them. The total number of peaks range between 40K to 85K. The Venn diagram maxes out with 5 replciates, so here we separated samples by line to evaluate the overlaps. The first line (S11, S19, and S20) have fewer total peaks and so the number of consensus peaks is smaller with 18,242 overlapping. The second line have more total peaks identified in each replicate and so we see a larger overlap of 33,385 peaks.
+* **ng knockout control samples:** In this group, we observe something similar to the OE and EV replicates. There are a large number of peaks and generally concordant good signal across all three replicates. The Venn diagram identifes 34,451 overlapping peaks across all three replicates.
+
+**Conclusion:** In all of the groups there is a high level of concordance across replicates. There is some variability with the KO samples but they still show a good overlap. **Based solely on the total number of peaks, there doesn't appear to be differences in the amount of the H3K27me3 modification**. However, there may be differences in the enrichment between groups (i.e the histone mark is present in all groups, but the pileup varies)
+
+
+## Binding profile assessment {.tabset}
+
+We can use the peak files to calculate the profile of the peaks binding to TSS regions using a package called [ChIPseeker](https://www.bioconductor.org/packages/release/bioc/vignettes/ChIPseeker/inst/doc/ChIPseeker.html). First we prepare the TSS regions, by defining the flanking sequence upstream (10K) and downstream (10K of the TSS sites. Next, ChIPseeker aligns the peaks that mapping to these regions, and uses the enrichment values to generate the tagMatrix. The tagMatrix is used to plot the signal profile for each sample. Confidence intervals are estimated by the bootstrap method and illustrated by the use of shading on the profile plot.
+
+```{r profile-setup, warning=FALSE, message=FALSE}
+# Profile of ChIP peaks binding to TSS
+require(ChIPseeker)
+require(EnsDb.Hsapiens.v75)
+
+# Get promoters
+ensdb <- EnsDb.Hsapiens.v75
+promoter <- getPromoters(TxDb=ensdb, upstream=5000, downstream=5000)
+```
+
+
+### Overexpression samples
+
+```{r profile-oe, warning=FALSE, message=FALSE}
+
+# Create list of peaks
+peakList <- list(S12=S12, S13=S13, S16=S16, S17=S17, S18=S18)
+
+# Compute tag matrix
+# Warning: seq levels in one file but not the other
+# compatible annotation build (both have 1 vs chr1) - different release?
+suppressWarnings(tagMatrixList <- lapply(peakList, getTagMatrix, windows=promoter))
+
+## Plot th binding profiles
+plotAvgProf(tagMatrixList, xlim=c(-5000, 5000), facet="row")
+
+```
+
+### Empty vector controls
+
+```{r profile-ev, warning=FALSE, message=FALSE}
+
+# Create list of peaks
+peakList <- list(S4=S4, S5=S5, S6=S6)
+
+# Compute tag matrix
+# Warning: seq levels in one file but not the other
+# compatible annotation build (both have 1 vs chr1) - different release?
+suppressWarnings(tagMatrixList <- lapply(peakList, getTagMatrix, windows=promoter))
+
+## Plot th binding profiles
+plotAvgProf(tagMatrixList, xlim=c(-5000, 5000), facet="row")
+
+```
+
+
+### Knockout samples
+
+```{r profile-ko, warning=FALSE, message=FALSE}
+# Create list of peaks
+peakList <- list(S11=S11, S19=S19, S20=S20, 
+                 S22=S22, S23=S23, S24=S24)
+
+# Compute tag matrix
+# Warning: seq levels in one file but not the other
+# compatible annotation build (both have 1 vs chr1) - different release?
+tic("tagMatrix start")
+suppressWarnings(tagMatrixList <- lapply(peakList, getTagMatrix, windows=promoter))
+toc()
+
+## Plot th binding profiles
+plotAvgProf(tagMatrixList, xlim=c(-5000, 5000), facet="row")
+```
+
+### ng knockout controls
+
+```{r profile-ng, warning=FALSE, message=FALSE}
+# Create list of peaks
+peakList <- list(S3=S3, S8=S8, S9=S9)
+
+# Compute tag matrix
+# Warning: seq levels in one file but not the other
+# compatible annotation build (both have 1 vs chr1) - different release?
+tic("tagMatrix start")
+suppressWarnings(tagMatrixList <- lapply(peakList, getTagMatrix, windows=promoter))
+toc()
+
+## Plot th binding profiles
+plotAvgProf(tagMatrixList, xlim=c(-5000, 5000), facet="row")
+
+```
+
+## {-}
+
+### Binding profile summary: 
+
+The peak calls in each sample group identify an enrichment of binding around the TSS. The enrichment takes the form of a broad peak and appears to be bimodal around the TSS. TFs competing with nucleosomes to access DNA at most binding sites, contributes to the bimodal distribution, which is a common feature of histone marks for TF binding. The binding profile is equally clear for all groups of samples.
+
+
+## SessionInfo
+A detailed summary of all the packages and package versions used to create this report.
+
+```{r session-info}
+sessionInfo()
+```
+
+
