@@ -1,0 +1,467 @@
+---
+title: "Greer - H3K27me3 DiffBind Using hg38 (no spike in)"
+author: "Meeta Mistry"
+date: "`r Sys.Date()`"
+output:
+   html_document:
+      code_folding: hide
+      highlights: pygments
+      theme: default
+      toc: true
+      toc_float:
+         collapsed: true
+         smooth_scroll: true
+---
+
+
+## Overview
+
+- Principal Investigator: Eric Greer
+- Experiment: CUT&RUN analysis of microprotein over- and under-expression
+
+## Analysis
+
+For project description see previous report. **The goal here is to re-run the differential enrichment analysis without the spike-in normalization.**
+
+
+```{r functions, echo=FALSE}
+# Load functions
+sanitize_datatable = function(df, ...) {
+ # remove dashes which cause wrapping
+ DT::datatable(df, ..., rownames=gsub("-", "_", rownames(df)),
+                   colnames=gsub("-", "_", colnames(df)))
+}
+
+```
+
+## Setup
+### Bioconductor and R libraries used
+
+```{r libraries, echo=TRUE}
+loadlibs <- function(){
+
+library(tidyverse)
+library(reshape)
+library(pheatmap)
+library(RColorBrewer)
+library(DT)
+library(ggrepel)
+library(viridis)
+library(DiffBind)
+library(magick)
+library(cowplot)
+library(ChIPseeker)
+library(AnnotationDbi)
+library(GenomicFeatures)
+library(EnsDb.Hsapiens.v86)
+# library(TxDb.Hsapiens.UCSC.hg38.knownGene)
+# library(DESeq2)
+}
+suppressPackageStartupMessages(loadlibs())
+
+```
+
+## Reading in peaks and counting reads
+
+DiffBind uses the alignment files (BAM) to compute count information for each of the peaks/regions in the consensus set. In this step, for each of the consensus regions DiffBind takes the number of aligned reads in the ChIP sample, to compute raw counts for each sample at every potential binding site. This is also done for the input samples separately. The peaks in the consensus peakset may be re-centered and trimmed based on calculating their summits (point of greatest read overlap) in order to provide more standardized peak intervals.
+
+*NOTE: This part can be computationally extensive and so code described below was run on the O2 cluster and results saved to an R object.* 
+
+
+```{r dbacount, eval=FALSE}
+# For the O2 cluster
+# module load gcc/6.2.0 R/4.1.1
+
+# Point to the library location
+.libPaths("/home/mm573/R/4.1.1")
+
+# Load the library
+library(DiffBind)
+
+# Read in the samplesheet
+samplesheet <- read.csv("DiffBind/samplesheet.csv")
+
+# Create the db object
+dbObj <- dba(sampleSheet=samplesheet)
+
+
+# Figure out the ideal summits value
+## You may want to look at your distribution of peak widths and choose a value accordingly, e.g. the minimum or first quartile value.
+summary(dbObj$binding[,3]-dbObj$binding[,2])
+
+# Calculate a binding matrix with scores based on read counts for every sample 
+dbObj <- dba.count(dbObj, summits = 350, bParallel = FALSE)
+```
+
+
+```{r load-db, echo=FALSE}
+# Load the Diffbind object
+load("diffbind_analysis_hg38/dbObj_KOcount.RData")
+load("diffbind_analysis_hg38/dbObj_OEcount.RData")
+dbObj_oe
+dbObj_ko
+```
+
+## Normalization
+For the consensus regions the raw counts are input subtracted and a library-size normalization is set as the default method within DiffBind. The RLE-based normalization (native DESeq2) and the TMM normalization (native edgeR), alters the data distribution to a greater extent. These methods developed for normalizing RNA-seq count matrices, produce results such that the binding changes are more evenly distributed between the two conditions. However, we have no reason to expect changes to be balanced, and so we stick with the default.
+
+```{r normalize}
+dbObj_oe <- dba.normalize(dbObj_oe)
+dbObj_ko <- dba.normalize(dbObj_ko)
+```
+
+
+## PCA and correlation heatmap {.tabset}
+Here, we use DiffBind functions to plot the PCA and correlation heatmaps. 
+
+**In both plots we observe a clear separation of samples by group, however there are differences observed between cell lines as well.**
+
+### Overexpression vs empty vector controls
+
+```{r oe-pca}
+
+# PCA using normalized bgsubtract counts
+dba.plotPCA(dbObj_oe,  attributes=DBA_FACTOR, label=DBA_ID,
+            score = DBA_SCORE_NORMALIZED)
+
+# Correlation heatmap
+dba.plotHeatmap(dbObj_oe, ColAttributes = DBA_FACTOR,
+                score = DBA_SCORE_NORMALIZED)
+
+```
+
+### Knockdown vs ng controls
+
+```{r ko-pca}
+# PCA using normalized bgsubtract counts
+dba.plotPCA(dbObj_ko,  attributes=DBA_FACTOR, label=DBA_ID,
+            score = DBA_SCORE_NORMALIZED)
+
+# Correlation heatmap
+dba.plotHeatmap(dbObj_ko, ColAttributes = DBA_FACTOR,
+                score = DBA_SCORE_NORMALIZED)
+
+```
+
+
+## Differential Enrichment Analysis
+Below we provide the two comparisons we are most interested in.
+
+* **ng versus KO**
+* **EV versus OE**
+
+The `dba.analyze()` function by default will also run blacklist filtering and greylist filtering, both of which are briefly described below. By default DiffBind uses the DESeq2 package to identify differentially enriched regions.
+
+* **Blacklists:** are pre-defined lists of regions specific to a reference genome that are known to be problematic. The best known lists have been identified as part of the ENCODE project.
+* **Greylists:** are specific to a ChIP-seq experiment, and are derived from the controls generated as part of the experiment. The idea is to identify anomalous regions where a disproportionate degree of signal is present. These regions can then be excluded from subsequent analysis.
+
+_**Both of these filterings were previously applied in our bcbio pipeline, prior to peak calling.**_
+
+_Note that the log fold change shrinkage from DESeq2 is automatically applied._
+
+
+```{r diffbind-de, progress=F}
+# Establishing contrasts of interest
+dbObj_oe <- dba.contrast(dbObj_oe, contrast = c("Factor", "EV", "OE"))
+dbObj_ko <- dba.contrast(dbObj_ko, contrast = c("Factor", "ng", "KO"))
+
+# Performing the differential enrichment analysis with DESeq2 default
+dbObj_oe <- dba.analyze(dbObj_oe, method=DBA_DESEQ2,
+                     bGreylist = FALSE, bBlacklist = FALSE)
+dbObj_ko <- dba.analyze(dbObj_ko, method=DBA_DESEQ2,
+                     bGreylist = FALSE, bBlacklist = FALSE)
+
+# Summary of results
+# Use padj (multiple test corrected) values to threshold
+oe_summary <- dba.show(dbObj_oe, bContrasts=T, th=0.05)
+ko_summary <- dba.show(dbObj_ko, bContrasts=T, th=0.05)
+
+sanitize_datatable(rbind(oe_summary, ko_summary), style='bootstrap')
+```
+
+## MA Plot {.tabset}
+
+For each contrast, we can use the MA plot to evaluate regions that are being differentially enriched for direction of change and the overall enrichment.
+
+_Each point represents a binding site, with points in magenta representing sites identified as differentially bound. There is a blue horizontal line through the origin (0 LFC), as well as a horizontal red curve representing a non-linear loess fit showing the underlying relationship between coverage levels and fold changes._
+
+### Empty vector vs. Overexpression
+A slightly larger number of magenta dots appear above the center line (755 regions). The positive fold change values indicate **most of the significant binding sites have a higher read count in the empty vector control samples**. This is concordant with the hypothesis that when Nop16 is overexpressed there are lower levels of the H3K27 tri-methylation. There are however, also sites that show the opposite effect (308 regions).
+
+```{r}
+dba.plotMA(dbObj_oe, method=DBA_DESEQ2, contrast = 1)
+resOE <- dba.report(dbObj_oe, method=DBA_DESEQ2, th=0.05)
+```
+
+### ngRNA control versus Knockout
+**The order of comparison is reversed here.** The positive fold change for this comparison indicates that the enrichment is higher in the KO group. This comparison has many more differentially enriched sites and the number that are up versus down are pretty balanced. We have **1585 regions with a positive fold change**, these are regions that have higher levels of H3K27 trimethylation when Nop16 is knocked out. These are regions that are in line with our hypothesis. In contrast, we have **1572 regions with a negative fold change** which represent increased tri-methylation in the control.
+
+```{r}
+dba.plotMA(dbObj_ko, method=DBA_DESEQ2, contrast = 1)
+resKO <- dba.report(dbObj_ko, method=DBA_DESEQ2, th=0.05)
+```
+
+
+## Annotate result files 
+For four of the comparisons in which we identified significant differential enrichment of regions, we used ChIPseeker to find nearest gene annotations. The files listed below are .csv files which contain the statistics from the DE analysis and columns containing annotation information:
+
+* [EV vs OE: total of 1063 regions](results_nospike/ev_OE_hg38_resAnnot.txt)
+  * 755 regions lose the H3K27 trimethylation mark in OE samples
+  * 308 regions gain the H3K27 trimethylation mark in OE samples
+* [ng vs KO: total of 3157 regions](./results_nospike/ng_KO_hg38_resAnnot.txt)
+  * 1572 regions lose the H3K27 trimethylation mark in KO samples
+  * 1583 regions gain the H3K27 trimethylation mark in KO samples
+
+
+```{r anno-output, echo=FALSE, eval=FALSE, warning=FALSE, message=FALSE, progress=FALSE}
+
+# Get db
+# txdb <- TxDb.Hsapiens.UCSC.hg38.knownGene
+
+txdb <- makeTxDbFromGFF("reference_data/ref-transcripts.gtf",
+                format="gtf",
+                dataSource = "hg38 genome files from bcbio run",
+                organism = "Homo sapiens")
+
+# Annotate all peaks
+resOE <- dba.report(dbObj_oe, method=DBA_DESEQ2, th=1)
+peakAnno_oe <- annotatePeak(resOE, tssRegion=c(-3000, 3000), TxDb=txdb)
+
+resKO <- dba.report(dbObj_ko, method=DBA_DESEQ2, th=1)
+peakAnno_ko <- annotatePeak(resKO, tssRegion=c(-3000, 3000), TxDb=txdb)
+
+# Get gene IDs and write to file (OE)
+annotations_edb <- AnnotationDbi::select(EnsDb.Hsapiens.v86,
+                                  keys = as.character(peakAnno_oe@anno$geneId),
+                                  columns = c("SYMBOL"),
+                                  keytype = "GENEID")
+peakAnno_oe@anno %>%
+  data.frame() %>% 
+  dplyr::left_join(annotations_edb, by=c("geneId" = "GENEID")) %>%
+  write_tsv("diffbind_analysis_hg38/results_nospike/ev_OE_hg38_resAnnot.txt")
+
+# Get gene IDs and write to file (KO)
+annotations_edb <- AnnotationDbi::select(EnsDb.Hsapiens.v86,
+                                  keys = as.character(peakAnno_ko@anno$geneId),
+                                  columns = c("SYMBOL"),
+                                  keytype = "GENEID")
+peakAnno_ko@anno %>%
+  data.frame() %>% 
+  dplyr::left_join(annotations_edb, by=c("geneId" = "GENEID")) %>%
+  write_tsv("diffbind_analysis_hg38/results_nospike/ng_KO_hg38_resAnnot.txt")
+
+```
+
+## Overlap with RNA-seq results {.tabset}
+RNA-seq analysis was performed to evaluate transcriptional changes associated with Nop16 manipulation. Here, we identify overlaps between the RNA-seq results and the target genes from the differential enrichment analysis.
+
+* When overexpressing Nop16 we expect to see a decrease in the H3K27me3 mark. We observe a majority of sites showing this trend. This **loss of a repressive mark, translates to an increase in expression of those target genes.**
+* When Nop16 expression is decreased through the use of knockdown event, we expect to see an increase in the H3K27me3 mark. **An increase in the number of H3K27me3 marks translates to a decrease in expression of those target genes.**
+
+```{r write-bedfiles, echo=FALSE, eval=FALSE}
+## Output significant regions for overlap
+oe <- peakAnno_oe@anno %>% data.frame()
+ko <- peakAnno_ko@anno %>% data.frame()
+
+# As BED files
+# For OE_EV a positive fold change means higher enrichment in EV
+oe %>% 
+  dplyr::filter(FDR < 0.05 & Fold > 0) %>%  
+  dplyr::select(seqnames, start, end, width, strand, Fold, FDR, geneId) %>%
+  write_tsv("diffbind_analysis_hg38/results_nospike/H3k27me3_mark_lost_in_OE_sig.bed",
+            col_names = FALSE)
+
+oe %>% 
+  dplyr::filter(FDR < 0.05 & Fold < 0) %>%
+  dplyr::select(seqnames, start, end, width, strand, Fold, FDR, geneId) %>%
+  write_tsv("diffbind_analysis_hg38/results_nospike/H3k27me3_mark_gained_in_OE_sig.bed",
+            col_names = FALSE)
+
+# As BED files
+# For KO_ng a positive fold change means higher enrichment in KO
+ko %>% 
+  dplyr::filter(FDR < 0.05 & Fold > 0) %>% 
+  dplyr::select(seqnames, start, end, width, strand, Fold, FDR, geneId) %>%
+  write_tsv("diffbind_analysis_hg38/results_nospike/H3k27me3_mark_gained_in_KO_sig.bed",
+            col_names = FALSE)
+
+ko %>% 
+  dplyr::filter(FDR < 0.05 & Fold < 0) %>% 
+  dplyr::select(seqnames, start, end, width, strand, Fold, FDR, geneId) %>%
+  write_tsv("diffbind_analysis_hg38/results_nospike/H3k27me3_mark_lost_in_KO_sig.bed",
+            col_names = FALSE)
+
+```
+
+```{r setupForVenn, message=FALSE, warning=FALSE}
+require(VennDiagram)
+## Read in full files
+rnaseqAll_oe <- read.csv("../rnaseq_analysis_of_microprotein_hbc04238/results/OE_vs_control_res_allgenes.csv")
+rnaseqAll_ko <- read.csv("../rnaseq_analysis_of_microprotein_hbc04238/results/KO_vs_control_res_allgenes.csv")
+
+```
+
+### Nop16 Overexpression 
+The 755 regions identified by DiffBind maps to 544 unique target genes. Of those genes only 15 overlap with the RNA-seq data.
+
+```{r venn-oe, eval=FALSE}
+# Create lists for comparison
+nop16oe <- list(
+  k27targets = oe %>% 
+    dplyr::filter(FDR < 0.05 & Fold > 0) %>% 
+    pull(geneId),
+  rnaseq = rnaseqAll_oe %>% 
+    dplyr::filter(padj < 0.05 & log2FoldChange > 0) %>% 
+  pull(ensgene))
+
+# Nop16oe
+venn.diagram(x = nop16oe, 
+             filename = "diffbind_analysis_hg38/results_nospike/venn/nospike_hg38_nop16oe.png",
+             output = TRUE,
+             main = "Over-expression of Nop16",
+             main.fontfamily = "sans",
+             main.cex = 0.75,
+             height = 600 , 
+             width = 600 , 
+             resolution = 300,
+             compression = "lzw",
+             lwd = 2,
+             col= "gray",
+             fill = c("salmon", "lightblue"),
+             cex = 0.5,
+             fontfamily = "sans",
+             fontsize = 5,
+             category.names = c("Genes decreased in \n H3K27me3 mark" , "Genes \n Up-regulated \n in OE"),
+             cat.cex = 0.5,
+             cat.fontface = "bold",
+             cat.default.pos = "outer",
+             cat.pos = 0,
+             cat.dist = c(0.05,0.097),
+             cat.fontfamily = "sans",
+             cat.col = c("salmon", "lightblue"))
+```
+
+
+```{r venn-oe-img, out.width = '100%', message=F, warning=F}
+img <- image_read("diffbind_analysis_hg38/results_nospike/venn/nospike_hg38_nop16oe.png")
+print(ggdraw() +
+        draw_image(img))
+```
+
+
+
+### Nop16 Knockout
+The 1585 regions identified by DiffBind maps to 1306 unique target genes. Of those genes 130 overlap with the RNA-seq data.
+
+```{r venn-ko, eval=FALSE}
+# Create lists for comparison
+nop16ko <- list(
+  k27targets =  ko %>% 
+    dplyr::filter(FDR < 0.05 & Fold > 0) %>% 
+    pull(geneId),
+  rnaseq = rnaseqAll_ko %>% 
+    dplyr::filter(padj < 0.05 & log2FoldChange < 0) %>% 
+  pull(ensgene))
+
+# Nop16ko
+venn.diagram(x = nop16ko, 
+             filename = "diffbind_analysis_hg38/results_nospike/venn/nospike_hg38_nop16ko.png",
+             output = TRUE,
+             main = "Knockdown of Nop16",
+             main.fontfamily = "sans",
+             main.cex = 0.75,
+             height = 600 , 
+             width = 600 , 
+             resolution = 300,
+             compression = "lzw",
+             lwd = 2,
+             col= "gray",
+             fill = c("salmon", "lightblue"),
+             cex = 0.5,
+             fontfamily = "sans",
+             category.names = c("Genes \n increased in \n H3K27me3 mark" , "Genes Down-regulated \n in KO"),
+             cat.cex = 0.5,
+             cat.fontface = "bold",
+             cat.default.pos = "outer",
+             cat.pos = 180,
+             cat.dist = c(0.05,0.05),
+             cat.fontfamily = "sans",
+             cat.col = c("salmon", "lightblue"))
+```
+
+```{r venn-ko-img}
+img <- image_read("diffbind_analysis_hg38/results_nospike/venn/nospike_hg38_nop16ko.png")
+print(ggdraw() +
+        draw_image(img))
+```
+
+
+## File Download
+The following files from the overlap analysis are linked below:
+
+**Nop16 Overexpression**
+
+* Genes that lost the H3K27me3 mark _and_ up-regulated in RNA-seq data ([download](results_nospike/venn/OE_combined.tsv))
+* Genes that lost the H3K27me3 mark but showed no corresponding increased expression in RNA-seq data ([download](results_nospike/venn/OE_k27me3_mark_lost_no_overlap_rnaseq.tsv))
+* Genes that were up-regulated in RNA-seq data but showed no differential enrichment of the H3k27me3 mark ([download](results_nospike/venn/OE_rnaseq_up_no_overlap_dbsig.tsv))
+
+**Nop16 Knockout**
+
+* Genes that gained the H3K27me3 mark _and_ down-regulated in RNA-seq data ([download](results_nospike/venn/KO_combined.tsv))
+* Genes that gained the H3K27me3 mark but showed no corresponding decreased expression in RNA-seq data ([download](results_nospike/venn/KO_k27me3_mark_gained_no_overlap_rnaseq.tsv))
+* Genes that were down-regulated in RNA-seq data but showed no differential enrichment of the H3k27me3 mark ([download](results_nospike/venn/KO_rnaseq_down_no_overlap_dbsig.tsv))
+
+
+```{r overlap-files, echo=FALSE, eval=FALSE}
+
+## Overlaps of regions losing mark in OE and overlap RNA-seq
+oe %>% 
+  dplyr::filter(FDR < 0.05 & Fold > 0) %>% 
+  dplyr::inner_join(dplyr::filter(rnaseqAll_oe, padj < 0.05 & log2FoldChange > 0),
+        by=c("geneId" = "ensgene")) %>% 
+  write_tsv(file = "diffbind_analysis_hg38/results_nospike/venn/OE_combined.tsv")
+
+## Overlaps of regions gaining mark in KO and overlap RNA-seq
+ko %>% 
+  dplyr::filter(FDR < 0.05 & Fold > 0) %>% 
+  dplyr::inner_join(dplyr::filter(rnaseqAll_ko, padj < 0.05 & log2FoldChange < 0),
+        by=c("geneId" = "ensgene")) %>% 
+  write_tsv(file = "diffbind_analysis_hg38/results_nospike/venn/KO_combined.tsv")
+
+## Regions where mark is lost in OE but no overlap with RNA-seq sig genes
+oe %>% dplyr::filter(FDR < 0.05 & Fold > 0) %>% 
+  dplyr::inner_join(rnaseqAll_oe, by=c("geneId" = "ensgene")) %>% 
+  dplyr::filter(padj >= 0.05 | is.na(padj)) %>% 
+  write_tsv(file = "diffbind_analysis_hg38/results_nospike/venn/OE_k27me3_mark_lost_no_overlap_rnaseq.tsv")
+
+## Regions where mark is gained in KO but no overlap with RNA-seq sig genes
+ko %>% dplyr::filter(FDR < 0.05 & Fold > 0) %>% 
+  dplyr::inner_join(rnaseqAll_ko, by=c("geneId" = "ensgene")) %>%  dim()
+  dplyr::filter(padj >= 0.05 | is.na(padj)) %>% 
+  write_tsv(file = "diffbind_analysis_hg38/results_nospike/venn/KO_k27me3_mark_gained_no_overlap_rnaseq.tsv")
+
+## RNA-seq significant genes that are significantly up-regulated in OE but show no change in the H3K27me3 mark
+rnaseqAll_oe %>% 
+  dplyr::filter(padj < 0.05 & log2FoldChange > 0) %>% 
+  dplyr::left_join(oe, by=c("ensgene" = "geneId")) %>% 
+  dplyr::filter(FDR >= 0.05) %>% 
+  write_tsv(file = "diffbind_analysis_hg38/results_nospike/venn/OE_rnaseq_up_no_overlap_dbsig.tsv")
+
+## RNA-seq significant genes that are significantly down-regulated in KO but show no change in the H3K27me3 mark
+rnaseqAll_ko %>% 
+  dplyr::filter(padj < 0.05 & log2FoldChange < 0) %>% 
+  dplyr::left_join(ko, by=c("ensgene" = "geneId")) %>% 
+  dplyr::filter(FDR >= 0.05) %>% 
+  write_tsv(file = "diffbind_analysis_hg38/results_nospike/venn/KO_rnaseq_down_no_overlap_dbsig.tsv")
+
+```
+
+
+
+## SessionInfo
+A detailed summary of all the packages and package versions used to create this report.
+
+```{r sessionInfo}
+
+sessionInfo()
+```
