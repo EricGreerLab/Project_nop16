@@ -1,0 +1,251 @@
+---
+title: "Karyotype diagrams for H3K27me3 CUT&RUN data (Greer Lab)"
+author: "Shannan Ho Sui"
+date: "1/12/2022"
+output:
+   html_document:
+      code_folding: hide
+      highlights: pygments
+      theme: default
+      toc: true
+      toc_float:
+         collapsed: true
+         smooth_scroll: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,warning = FALSE, message = FALSE)
+```
+
+Using ggbio to plot distribution of H3K27me3 signal across chromosomes.
+
+
+```{r Functions}
+library(GenomicRanges)
+library(ggbio)
+library(rtracklayer)
+library(diffloop)
+library(viridis)
+
+setwd("~/Dropbox (Harvard University)/HBC Team Folder (1)/Consults/eric_greer/cutnrun_analysis_of_microprotein_hbc04238/ggbio/")
+
+## Function to load broadPeak files into gRanges object
+load_broadPeak <- function(file_broadPeak) {
+  # specify extra columns for bed format
+  extraCols_broadPeak <- c(signalValue = "numeric", pValue = "numeric", qValue = "numeric")
+  
+  # import as bed file
+  gr_broadPeak <- import.bed(file_broadPeak, 
+                             extraCols = extraCols_broadPeak)
+  # remove nonstandard chromosomes
+  gr_broadPeak <- keepStandardChromosomes(gr_broadPeak, pruning.mode = "tidy")
+ 
+  # add "chr" to the beginning of the seqnames using the diffloop package
+  gr_broadPeak <- addchr(gr_broadPeak)
+  return(gr_broadPeak)
+} 
+
+## Function to plot karyogram
+
+plot_custom_karyogram <- function(gr_broadPeak) {
+  # load hg19 annotation package for karyogram. Note that this is not updated for hg38
+  data(ideoCyto, package = "biovizBase")
+  
+  # add seqlengths and reorder them
+  seqlengths(gr_broadPeak)
+  seqlengths(gr_broadPeak) <- seqlengths(ideoCyto$hg19)[names(seqlengths(gr_broadPeak))]
+  gr_broadPeak <- keepSeqlevels(gr_broadPeak, paste0("chr", c(1:22, "X")))
+  
+  # plot karyogram using ggbio; basic layout
+  p <- autoplot(gr_broadPeak, layout = "karyogram", aes(color=log(score)))
+  return(p)
+}
+```
+
+## Plot each sample in a karyogram
+
+This first section tests out the method to create draft figures that will be iterated on.
+
+```{r plotBySample}
+
+file_broadPeak <- "../data/macs2/X2020-10-27-CUTRUN-KT-MB231-12-OE1-H3K27me3-1_S12_peaks.broadPeak"
+S12 <- load_broadPeak(file_broadPeak)
+
+# plot and write to pdf
+#pdf("OE1-H3K27me3-1_S12_v2.pdf")
+plot_custom_karyogram(S12) + labs(title = "OE1-H3K27me3-1_S12") + 
+  scale_color_viridis(limits = c(2,6))
+#dev.off()
+
+file_broadPeak <- "../data/macs2/X2020-10-27-CUTRUN-KT-MB231-13-OE1-H3K27me3-2_S13_peaks.broadPeak"
+S13 <- load_broadPeak(file_broadPeak)
+
+#pdf("OE1-H3K27me3-2_S13_v2.pdf")
+plot_custom_karyogram(S13) + labs(title = "OE1-H3K27me3-2_S13") + 
+  scale_color_viridis(limits = c(2,6))
+#dev.off()
+
+file_broadPeak <- "../data/macs2/X2020-10-27-CUTRUN-KT-MB231-04-EV-H3K27me3-1_S4_peaks.broadPeak"
+S4 <- load_broadPeak(file_broadPeak)
+
+#pdf("EV-H3K27me3-1_S4_v2.pdf")
+plot_custom_karyogram(S4) + labs(title = "EV-H3K27me3-1_S4") + 
+  scale_color_viridis(limits = c(2,6))
+#dev.off()
+
+```
+
+## Now plot merged replicates
+
+Replicates for each condition were merged using bedops. For each overlapping region, the maximum score was used as the enrichment value.
+
+```{r plotMergedReps}
+
+# Plot OE
+#file_broadPeak <- "OE.merge.bed"
+file_broadPeak <- "OE.merge_S12_S13_S16_S17_S18.bed"
+gr_broadPeak_OE <- load_broadPeak(file_broadPeak)
+
+# plot summary statistics to check which scale to use for the color heatmap
+summary(log(gr_broadPeak_OE$score))
+gr_broadPeak_OE[log(gr_broadPeak_OE$score) > 5]
+
+pdf("OE_intersect.pdf")
+plot_custom_karyogram(gr_broadPeak_OE) + 
+  scale_color_viridis(limits = c(2,6)) +
+  labs(title = "OE merged")
+dev.off()
+
+###################
+
+# Plot EV
+#file_broadPeak <- "EV.merge.bed"
+file_broadPeak <- "EV.merge_S4_S5_S6.bed"
+
+gr_broadPeak_EV <- load_broadPeak(file_broadPeak)
+
+# plot summary statistics to check which scale to use for the color heatmap
+summary(log(gr_broadPeak_EV$score))
+
+pdf("EV_intersect.pdf")
+plot_custom_karyogram(gr_broadPeak_EV) + 
+  scale_color_viridis(limits = c(2,6)) +
+  labs(title = "EV merged")
+dev.off()
+
+########################3
+
+## Plot NG
+#file_broadPeak <- "NG.merge.bed"
+file_broadPeak <- "NG.merge_S3_S8_S9.bed"
+gr_broadPeak_NG <- load_broadPeak(file_broadPeak)
+
+# plot summary statistics to check which scale to use for the color heatmap
+summary(log(gr_broadPeak_NG$score))
+
+pdf("NG_intersect.pdf")
+plot_custom_karyogram(gr_broadPeak_NG) +
+  scale_color_viridis(limits = c(2,6)) +
+  labs(title = "ng merged")
+dev.off()
+
+########################3
+
+## Plot KO
+#file_broadPeak <- "KO.merge.bed"
+file_broadPeak <- "KO.merge_S22_S23_S24.bed"
+gr_broadPeak_KO <- load_broadPeak(file_broadPeak)
+
+summary(log(gr_broadPeak_KO$score))
+
+pdf("KO_intersect.pdf")
+plot_custom_karyogram(gr_broadPeak_KO) +
+  scale_color_viridis(limits = c(2,6)) +
+  labs(title = "KO merged")
+dev.off()
+
+
+```
+
+## Now plot the foldchange between conditions
+
+### EV versus OE
+
+I used the same directionality that Meeta used in the Diffbind analysis. That is, negative "scores" are the negative foldchanges when comparing EV to OE, meaning that a negative value indicates that H3K27me3 marks gained in OE.
+
+
+```{r fc_plot_EV_vs_OE}
+
+# Load diffbind data
+OE_gained_file <- "../diffbind_analysis/results/H3k27me3_mark_gained_in_OE_sig.txt"
+OE_lost_file <- "../diffbind_analysis/results/H3k27me3_mark_lost_in_OE_sig.txt"
+
+OE_gained <- read.delim(OE_gained_file)
+OE_lost <- read.delim(OE_lost_file)
+
+# concatenate positive and negative foldchanges for EV vs. OE comparison
+EV_vs_OE <- rbind(OE_gained, OE_lost)
+name <- paste("chr", EV_vs_OE$seqnames, EV_vs_OE$start, sep="_")
+
+# set foldchange as the score
+EV_vs_OE <- EV_vs_OE[,c("seqnames", "start", "end","width", "Fold" )]
+EV_vs_OE$width <- name
+colnames(EV_vs_OE) <- c("chr", "start", "end", "name", "score")
+
+# create gRanges object from dataframe and clean up
+gr_EV_vs_OE <- makeGRangesFromDataFrame(EV_vs_OE)
+mcols(gr_EV_vs_OE)$score <- EV_vs_OE$score
+
+gr_EV_vs_OE <- keepStandardChromosomes(gr_EV_vs_OE, pruning.mode = "tidy")
+gr_EV_vs_OE <- addchr(gr_EV_vs_OE)
+
+# plot summary statistics to check which scale to use for the color heatmap
+summary(gr_EV_vs_OE$score)
+
+#pdf("EV_vs_OE_fc.pdf")
+plot_custom_karyogram(gr_EV_vs_OE) +
+  scale_color_viridis(limits = c(-5,6)) +
+  labs(title = "EV vs. OE (foldchange)")
+#dev.off()
+
+```
+
+### ng VS KO
+
+Similarly for ng_vs_KO, negative values represent increased H3K27me3 in KO.
+
+```{r fc_plot_ng_vs_KO}
+
+# Load diffbind data
+KO_gained_file <- "../diffbind_analysis/results/H3k27me3_mark_gained_in_KO_sig.txt"
+KO_lost_file <- "../diffbind_analysis/results/H3k27me3_mark_lost_in_KO_sig.txt"
+
+KO_gained <- read.delim(KO_gained_file)
+KO_lost <- read.delim(KO_lost_file)
+
+# concatenate positive and negative foldchanges for ng vs. KO comparison
+ng_vs_KO <- rbind(KO_gained, KO_lost)
+name <- paste("chr", ng_vs_KO$seqnames,ng_vs_KO$start, sep="_")
+
+# set foldchange as the score
+ng_vs_KO <- ng_vs_KO[,c("seqnames", "start", "end","width", "Fold" )]
+ng_vs_KO$width <- name
+colnames(ng_vs_KO) <- c("chr", "start", "end", "name", "score")
+
+# create gRanges object from dataframe and clean up
+gr_ng_vs_KO <- makeGRangesFromDataFrame(ng_vs_KO)
+mcols(gr_ng_vs_KO)$score <- ng_vs_KO$score
+
+gr_ng_vs_KO <- keepStandardChromosomes(gr_ng_vs_KO, pruning.mode = "tidy")
+gr_ng_vs_KO <- addchr(gr_ng_vs_KO)
+
+# plot summary statistics to check which scale to use for the color heatmap
+summary(gr_ng_vs_KO$score)
+
+#pdf("ng_vs_KO_fc.pdf")
+plot_custom_karyogram(gr_ng_vs_KO) +
+  scale_color_viridis(limits = c(-5,6)) +
+  labs(title = "ng vs. KO (foldchange)")
+#dev.off()
+
+```
